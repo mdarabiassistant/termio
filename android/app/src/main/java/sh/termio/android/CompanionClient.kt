@@ -5,13 +5,17 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import io.github.sagernet.libghostty.GhosttyTerminalSession
 import java.net.URI
 import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
+import java.util.UUID
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -19,6 +23,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import org.json.JSONArray
 import org.json.JSONObject
 
 data class RemoteSession(val id: String, val title: String, val agent: String = "", val status: String = "")
@@ -27,6 +32,7 @@ data class RemoteProject(val id: String, val name: String, val workspaceID: Stri
 data class CompanionState(
     val address: String = "",
     val macName: String = "Termio",
+    val macID: String = "",
     val status: String = "",
     val error: String = "",
     val connected: Boolean = false,
@@ -39,6 +45,63 @@ data class CompanionState(
 )
 
 data class PairingAddress(val url: String, val token: String)
+
+data class PairedMachine(val id: String, val address: String, val name: String, val macID: String = "")
+data class MachineState(val machine: PairedMachine, val connection: CompanionState)
+data class HomeState(
+    val machines: List<MachineState> = emptyList(),
+    val selectedMachineID: String? = null,
+    val showingPairing: Boolean = false,
+    val pairingAddress: String = "",
+    val pairingError: String = "",
+) {
+    val selectedConnection: CompanionState?
+        get() = machines.firstOrNull { it.machine.id == selectedMachineID }?.connection
+}
+
+object PairedMachines {
+    fun encode(machines: List<PairedMachine>): String = JSONArray().apply {
+        machines.forEach { machine ->
+            put(JSONObject().put("id", machine.id).put("address", machine.address)
+                .put("name", machine.name).put("macID", machine.macID))
+        }
+    }.toString()
+
+    fun restore(saved: String?, legacyAddress: String?): List<PairedMachine> {
+        if (saved == null) {
+            return legacyAddress?.takeIf { it.isNotEmpty() }?.let {
+                listOf(pair(emptyList(), CompanionProtocol.pairingAddress(it)))
+            }.orEmpty()
+        }
+        val rows = JSONArray(saved)
+        return (0 until rows.length()).map { index ->
+            val row = rows.getJSONObject(index)
+            val address = CompanionProtocol.pairingAddress(row.getString("address"))
+            val id = row.getString("id")
+            require(id.isNotEmpty()) { "The saved Mac has no identity." }
+            PairedMachine(id, address.url, row.optString("name").ifEmpty { URI(address.url).host },
+                if (row.isNull("macID")) "" else row.optString("macID"))
+        }.distinctBy { it.id }
+    }
+
+    fun pair(machines: List<PairedMachine>, address: PairingAddress): PairedMachine {
+        val existing = machines.firstOrNull { endpoint(it.address) == endpoint(address.url) }
+        return existing?.copy(address = address.url)
+            ?: PairedMachine(UUID.randomUUID().toString(), address.url, URI(address.url).host)
+    }
+
+    fun identify(machines: List<PairedMachine>, machine: PairedMachine, macID: String, name: String): PairedMachine {
+        val existing = machines.firstOrNull { macID.isNotEmpty() && it.macID == macID && it.id != machine.id }
+        return machine.copy(id = existing?.id ?: machine.id, name = name.ifEmpty { machine.name }, macID = macID)
+    }
+
+    private fun endpoint(address: String): List<String> {
+        val uri = URI(address)
+        val port = if (uri.port == -1) { if (uri.scheme == "wss") 443 else 80 } else uri.port
+        return listOf(uri.scheme.lowercase(), uri.host.lowercase(), port.toString(), uri.rawPath.ifEmpty { "/" },
+            uri.rawQuery.orEmpty().split('&').filter { it.substringBefore('=') != "t" }.sorted().joinToString("&"))
+    }
+}
 
 object CompanionProtocol {
     const val wireVersion = 2
@@ -103,17 +166,161 @@ object CompanionProtocol {
     }
 
     fun refusal(message: JSONObject): String = when (message.optString("code")) {
-        "unauthorized" -> "This Mac didn’t recognize this phone. Copy its address again in Settings ▸ Mobile."
+        "unauthorized" -> "This Mac didn’t recognize this phone. Scan its QR code again in Settings ▸ Mobile."
         "client_too_old" -> "Update Termio on this phone."
         else -> message.optString("message", "The Mac refused the request.")
     }
 }
 
 class CompanionClient(application: Application) : AndroidViewModel(application) {
-    private val handler = Handler(Looper.getMainLooper())
+    private class MachineLink(var machine: PairedMachine, val connection: MacConnection, var observation: Job? = null)
+
     private val preferences = application.getSharedPreferences("companion", Application.MODE_PRIVATE)
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
-    private val mutableState = MutableStateFlow(CompanionState(address = preferences.getString("address", "").orEmpty()))
+    private val links = linkedMapOf<String, MachineLink>()
+    private val mutableState = MutableStateFlow(HomeState())
+    val state = mutableState.asStateFlow()
+    private var foreground = false
+
+    init {
+        val saved = try {
+            PairedMachines.restore(preferences.getString("machines", null), preferences.getString("address", null))
+        } catch (failure: Exception) {
+            Log.w("CompanionClient", "Saved Macs could not be read: ${failure.javaClass.simpleName}")
+            mutableState.update { it.copy(pairingError = "Couldn’t read saved Macs. Scan their QR codes again.") }
+            emptyList()
+        }
+        saved.forEach(::addLink)
+        if (saved.isNotEmpty()) saveMachines()
+        publish()
+    }
+
+    fun beginPairing() {
+        mutableState.update { it.copy(showingPairing = true, pairingAddress = "", pairingError = "") }
+    }
+
+    fun cancelPairing() {
+        mutableState.update { it.copy(showingPairing = false, pairingAddress = "", pairingError = "") }
+    }
+
+    fun editPairingAddress(address: String) {
+        mutableState.update { it.copy(pairingAddress = address, pairingError = "") }
+    }
+
+    fun connect(address: String) {
+        val parsed = try { CompanionProtocol.pairingAddress(address) } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(pairingError = failure.message.orEmpty()) }
+            return
+        }
+        val machine = PairedMachines.pair(links.values.map { it.machine }, parsed)
+        links[machine.id]?.let(::closeLink)
+        addLink(machine)
+        saveMachines()
+        mutableState.update { it.copy(showingPairing = false, pairingAddress = "", pairingError = "") }
+        publish()
+    }
+
+    private fun addLink(machine: PairedMachine) {
+        val connection = MacConnection(getApplication(), client)
+        val link = MachineLink(machine, connection)
+        links[machine.id] = link
+        connection.onStarted = { session ->
+            if (state.value.selectedMachineID == link.machine.id) openSession(link.machine.id, session)
+        }
+        link.observation = viewModelScope.launch {
+            connection.state.collect { current ->
+                if (links[link.machine.id] !== link) return@collect
+                if (current.connected) {
+                    val identified = PairedMachines.identify(links.values.map { it.machine }, link.machine,
+                        current.macID, current.macName)
+                    if (identified != link.machine) {
+                        if (identified.id != link.machine.id) {
+                            links[identified.id]?.let(::closeLink)
+                            links.remove(link.machine.id)
+                            links[identified.id] = link
+                        }
+                        link.machine = identified
+                        saveMachines()
+                    }
+                }
+                publish()
+            }
+        }
+        connection.connect(machine.address)
+    }
+
+    private fun publish() {
+        mutableState.update { home ->
+            home.copy(machines = links.values.map { MachineState(it.machine, it.connection.state.value) })
+        }
+    }
+
+    private fun saveMachines() {
+        val saved = PairedMachines.encode(links.values.map { it.machine })
+        if (saved != preferences.getString("machines", null) || preferences.contains("address")) {
+            preferences.edit().putString("machines", saved).remove("address").apply()
+        }
+    }
+
+    fun retryMachine(id: String) {
+        links[id]?.let { it.connection.connect(it.machine.address) }
+    }
+
+    fun deleteMachine(id: String) {
+        val link = links.remove(id) ?: return
+        closeLink(link)
+        saveMachines()
+        publish()
+    }
+
+    private fun closeLink(link: MachineLink) {
+        if (state.value.selectedMachineID == link.machine.id) leaveSession()
+        link.observation?.cancel()
+        link.connection.close()
+    }
+
+    fun startTerminal(machineID: String) {
+        val connection = links[machineID]?.connection ?: return
+        if (!connection.state.value.connected) return
+        leaveSession()
+        mutableState.update { it.copy(selectedMachineID = machineID) }
+        connection.setForeground(foreground)
+        connection.startTerminal()
+    }
+
+    fun openSession(machineID: String, session: RemoteSession) {
+        val connection = links[machineID]?.connection ?: return
+        if (!connection.state.value.connected) return
+        leaveSession()
+        mutableState.update { it.copy(selectedMachineID = machineID) }
+        connection.setForeground(foreground)
+        connection.openSession(session)
+    }
+
+    fun leaveSession() {
+        links[state.value.selectedMachineID]?.connection?.let {
+            it.setForeground(false)
+            it.leaveSession()
+        }
+        mutableState.update { it.copy(selectedMachineID = null) }
+    }
+
+    fun setForeground(visible: Boolean) {
+        foreground = visible
+        links.values.forEach { it.connection.setForeground(visible && it.machine.id == state.value.selectedMachineID) }
+    }
+
+    override fun onCleared() {
+        links.values.forEach(::closeLink)
+        client.dispatcher.executorService.shutdown()
+        client.connectionPool.evictAll()
+    }
+}
+
+private class MacConnection(private val application: Application, private val client: OkHttpClient) {
+    var onStarted: (RemoteSession) -> Unit = {}
+    private val handler = Handler(Looper.getMainLooper())
+    private val mutableState = MutableStateFlow(CompanionState())
     val state = mutableState.asStateFlow()
     private var pairing: PairingAddress? = null
     private var rosterSocket: WebSocket? = null
@@ -125,11 +332,9 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
     private var viewportRows = 24
     private var cellWidthPixels = 0
     private var cellHeightPixels = 0
-    private val retryRoster = Runnable { if (pairing != null) dialRoster() }
     private val retrySession = Runnable { if (state.value.session != null) dialSession() }
-
-    init {
-        state.value.address.takeIf { it.isNotEmpty() }?.let(::connect)
+    private val rosterTimeout = Runnable {
+        if (!state.value.connected && rosterSocket != null) rosterDisconnected(rosterSocket)
     }
 
     fun connect(address: String) {
@@ -145,7 +350,7 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
 
     private fun dialRoster() {
         val address = pairing ?: return
-        handler.removeCallbacks(retryRoster)
+        handler.removeCallbacks(rosterTimeout)
         mutableState.update { it.copy(status = "Connecting…", connected = false) }
         rosterSocket = client.newWebSocket(Request.Builder().url(address.url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -163,6 +368,7 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
                 handler.post { rosterDisconnected(webSocket) }
             }
         })
+        handler.postDelayed(rosterTimeout, 15000)
     }
 
     private fun receiveRoster(text: String) {
@@ -171,38 +377,34 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
             "roster" -> {
                 if (message.optInt("wire") < CompanionProtocol.wireVersion) {
                     stopConnections()
-                    mutableState.update { it.copy(error = "Update Termio on your Mac to connect this phone.", status = "") }
+                    mutableState.update { it.copy(connected = false,
+                        error = "Update Termio on your Mac to connect this phone.", status = "") }
                     return
                 }
-                preferences.edit().putString("address", pairing?.url).apply()
+                handler.removeCallbacks(rosterTimeout)
                 mutableState.update { it.copy(hasRoster = true, connected = true, status = "Connected", error = "",
-                    macName = message.optString("macName", "Termio"), projects = CompanionProtocol.projects(message)) }
+                    macName = if (message.isNull("macName")) "" else message.optString("macName"),
+                    macID = if (message.isNull("macID")) "" else message.optString("macID"),
+                    projects = CompanionProtocol.projects(message)) }
             }
             "started" -> {
                 val id = message.optString("session")
-                if (id.isNotEmpty()) openSession(RemoteSession(id, "Terminal"))
+                if (id.isNotEmpty()) onStarted(RemoteSession(id, "Terminal"))
             }
             "error" -> {
-                mutableState.update { it.copy(error = CompanionProtocol.refusal(message)) }
-                if (message.optString("code") in listOf("unauthorized", "client_too_old")) {
+                if (!state.value.hasRoster || message.optString("code") in listOf("unauthorized", "client_too_old")) {
                     stopConnections()
-                    mutableState.update { it.copy(status = "", connected = false, hasRoster = false) }
-                }
+                    mutableState.update { it.copy(status = "", connected = false, error = CompanionProtocol.refusal(message)) }
+                } else mutableState.update { it.copy(error = CompanionProtocol.refusal(message)) }
             }
         }
     }
 
-    private fun rosterDisconnected(socket: WebSocket) {
+    private fun rosterDisconnected(socket: WebSocket?) {
         if (socket !== rosterSocket || pairing == null) return
-        if (!state.value.hasRoster) {
-            stopConnections()
-            mutableState.update { it.copy(connected = false, status = "",
-                error = "Couldn’t connect to this Mac. Scan its QR code in Settings ▸ Mobile and try again.") }
-            return
-        }
-        mutableState.update { it.copy(connected = false, status = "Reconnecting…") }
-        handler.removeCallbacks(retryRoster)
-        handler.postDelayed(retryRoster, 2500)
+        stopConnections()
+        mutableState.update { it.copy(connected = false, status = "",
+            error = "Couldn’t connect to this Mac. Check Mobile Access on your Mac, then tap Retry.") }
     }
 
     fun startTerminal() {
@@ -225,10 +427,10 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
         handler.removeCallbacks(retrySession)
         closeSessionSocket()
         state.value.terminal?.close()
-        val terminal = GhosttyTerminalSession(getApplication())
+        val terminal = GhosttyTerminalSession(application)
         terminal.transport = object : GhosttyTerminalSession.Transport {
             override fun sendInput(data: ByteArray) {
-                handler.post { if (state.value.terminal === terminal) this@CompanionClient.sendInput(data) }
+                handler.post { if (state.value.terminal === terminal) this@MacConnection.sendInput(data) }
             }
             override fun sendResize(columns: Int, rows: Int, widthPixels: Int, heightPixels: Int) {
                 if (applyingSharedGrid || state.value.terminal !== terminal) return
@@ -343,27 +545,21 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
         mutableState.update { it.copy(session = null, terminal = null, sessionReady = false) }
     }
 
-    fun changeMac() {
-        stopConnections()
-        preferences.edit().remove("address").apply()
-        mutableState.value = CompanionState()
-    }
-
     private fun closeSessionSocket() {
         sessionAuthenticated = false
         val socket = sessionSocket
         sessionSocket = null
-        socket?.close(1000, null)
+        socket?.cancel()
     }
 
     private fun stopConnections() {
-        handler.removeCallbacks(retryRoster)
+        handler.removeCallbacks(rosterTimeout)
         handler.removeCallbacks(retrySession)
         leaveSession()
         pairing = null
         val socket = rosterSocket
         rosterSocket = null
-        socket?.close(1000, null)
+        socket?.cancel()
     }
 
     private fun decode(text: String): JSONObject? = try { JSONObject(text) } catch (error: Exception) {
@@ -371,9 +567,7 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
         null
     }
 
-    override fun onCleared() {
+    fun close() {
         stopConnections()
-        client.dispatcher.executorService.shutdown()
-        client.connectionPool.evictAll()
     }
 }
