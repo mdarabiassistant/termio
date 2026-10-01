@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -190,6 +191,22 @@ private fun PairPage(state: HomeState, client: CompanionClient, modifier: Modifi
 @Composable
 private fun SessionList(state: HomeState, client: CompanionClient, modifier: Modifier) {
     val listState = rememberLazyListState()
+    var pendingDeletionID by rememberSaveable { mutableStateOf<String?>(null) }
+    val pendingDeletion = state.machines.firstOrNull { it.machine.id == pendingDeletionID }?.machine
+    if (pendingDeletion != null) AlertDialog(
+        onDismissRequest = { pendingDeletionID = null },
+        title = { Text("Delete “${pendingDeletion.name}”?") },
+        text = { Text("This removes the saved connection from this phone. Sessions on your Mac keep running.") },
+        confirmButton = {
+            TextButton(onClick = {
+                pendingDeletionID = null
+                client.deleteMachine(pendingDeletion.id)
+            }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = {
+            TextButton(onClick = { pendingDeletionID = null }) { Text("Cancel") }
+        },
+    )
     LaunchedEffect(state.showingPairing) {
         if (state.showingPairing) listState.scrollToItem(0)
     }
@@ -205,7 +222,7 @@ private fun SessionList(state: HomeState, client: CompanionClient, modifier: Mod
                 Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(machine.name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f),
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    TextButton(onClick = { client.deleteMachine(machine.id) }) {
+                    TextButton(onClick = { pendingDeletionID = machine.id }) {
                         Text("Delete", color = MaterialTheme.colorScheme.error)
                     }
                 }
