@@ -1,10 +1,17 @@
 package sh.termio.android
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -18,8 +25,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,12 +50,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.sagernet.libghostty.compose.GhosttyDialogs
 import io.github.sagernet.libghostty.compose.GhosttyExtraKeysBar
@@ -118,12 +131,45 @@ private fun TermioApp(client: CompanionClient) {
 @Composable
 private fun PairPage(state: CompanionState, client: CompanionClient, modifier: Modifier) {
     var address by rememberSaveable(state.address) { mutableStateOf(state.address) }
-    Column(modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    var scanning by rememberSaveable { mutableStateOf(false) }
+    var cameraDenied by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        cameraDenied = !granted
+        scanning = granted
+    }
+    if (scanning) QrScanner(onDismiss = { scanning = false }, onScan = { scannedAddress ->
+        scanning = false
+        address = scannedAddress
+        client.connect(scannedAddress)
+    })
+    Column(modifier.verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Image(painterResource(R.drawable.termio_icon), contentDescription = null,
             modifier = Modifier.size(64.dp))
         Text("Connect a Mac", style = MaterialTheme.typography.headlineSmall)
-        Text("In Termio on your Mac, open Settings ▸ Mobile, turn off Direct Attach, and copy the address below the QR code.",
+        Text("In Termio on your Mac, open Settings ▸ Mobile, turn off Direct Attach, and scan the QR code.",
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Button(onClick = {
+            focusManager.clearFocus()
+            keyboard?.hide()
+            cameraDenied = false
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                scanning = true
+            } else cameraPermission.launch(Manifest.permission.CAMERA)
+        }, modifier = Modifier.fillMaxWidth(), enabled = state.status != "Connecting…") {
+            Text("Scan QR Code")
+        }
+        if (cameraDenied) {
+            Text("Allow camera access to scan a QR code, or paste the Mac address below.",
+                color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null)))
+            }) { Text("Open Settings") }
+        }
         OutlinedTextField(
             value = address,
             onValueChange = { address = it },

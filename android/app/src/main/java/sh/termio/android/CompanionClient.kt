@@ -45,21 +45,24 @@ object CompanionProtocol {
 
     fun pairingAddress(raw: String): PairingAddress {
         val uri = try { URI(raw.trim()) } catch (_: Exception) {
-            throw IllegalArgumentException("Copy the address from Settings ▸ Mobile on your Mac.")
+            throw IllegalArgumentException("Scan the QR code or copy the address from Settings ▸ Mobile on your Mac.")
+        }
+        require(uri.scheme?.lowercase() != "termio" || uri.host != "device") {
+            "Turn off Direct Attach in Settings ▸ Mobile on your Mac, then scan the QR code again."
         }
         val scheme = when (uri.scheme?.lowercase()) {
             "ws", "http" -> "ws"
             "wss", "https" -> "wss"
-            else -> throw IllegalArgumentException("Copy the address from Settings ▸ Mobile on your Mac.")
+            else -> throw IllegalArgumentException("Scan the QR code or copy the address from Settings ▸ Mobile on your Mac.")
         }
         require(!uri.host.isNullOrEmpty() && uri.rawUserInfo == null && (uri.port == -1 || uri.port in 1..65535)) {
-            "Copy the address from Settings ▸ Mobile on your Mac."
+            "Scan the QR code or copy the address from Settings ▸ Mobile on your Mac."
         }
         val token = uri.rawQuery.orEmpty().split('&').firstNotNullOfOrNull { field ->
             val parts = field.split('=', limit = 2)
             if (parts.size == 2 && parts[0] == "t") URLDecoder.decode(parts[1], "UTF-8") else null
         }
-        require(!token.isNullOrEmpty()) { "The address has no pairing token. Copy it again from your Mac." }
+        require(!token.isNullOrEmpty()) { "The address has no pairing token. Scan or copy it again from your Mac." }
         val url = scheme + ":" + uri.rawSchemeSpecificPart
         return PairingAddress(url, token)
     }

@@ -11,8 +11,8 @@ android {
         applicationId 'sh.termio.android'
         minSdk 26
         targetSdk 34
-        versionCode 2
-        versionName '0.2-prototype'
+        versionCode 3
+        versionName '0.3-prototype'
     }
 
     compileOptions {
@@ -31,6 +31,10 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.11.0'
     implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.camera:camera-camera2:1.6.2'
+    implementation 'androidx.camera:camera-view:1.6.2'
+    implementation 'androidx.camera:camera-mlkit-vision:1.6.2'
+    implementation 'com.google.mlkit:barcode-scanning:17.3.0'
     implementation 'io.github.sagernet:libghostty-android:0.1.0-alpha01'
     implementation 'io.github.sagernet:libghostty-android-compose:0.1.0-alpha01'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'

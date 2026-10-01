@@ -18,6 +18,14 @@ class CompanionProtocolTest {
         }
     }
 
+    @Test fun directAttachQrCodesExplainHowToGetACompatibleCode() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            CompanionProtocol.pairingAddress("termio://device?token=secret")
+        }
+        assertEquals("Turn off Direct Attach in Settings ▸ Mobile on your Mac, then scan the QR code again.", error.message)
+        assertFalse(error.message.orEmpty().contains("secret"))
+    }
+
     @Test fun eachSessionAuthenticatesBeforeAttachingAndDeclaringItsViewport() {
         val messages = CompanionProtocol.sessionPreamble("secret", "session", 47, 30).map(::JSONObject)
         assertEquals(listOf("auth", "attach", "resize"), messages.map { it.getString("t") })
