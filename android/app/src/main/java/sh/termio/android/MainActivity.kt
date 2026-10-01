@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -43,8 +42,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,7 +52,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,8 +62,6 @@ import io.github.sagernet.libghostty.compose.GhosttyDialogs
 import io.github.sagernet.libghostty.compose.GhosttyExtraKeysBar
 import io.github.sagernet.libghostty.compose.GhosttyTerminal
 import io.github.sagernet.libghostty.compose.rememberGhosttyTerminalState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val client: CompanionClient by viewModels()
@@ -264,31 +258,7 @@ private fun SessionList(state: HomeState, client: CompanionClient, modifier: Mod
 @Composable
 private fun TerminalPage(state: CompanionState, modifier: Modifier) {
     val terminalState = rememberGhosttyTerminalState()
-    val coroutineScope = rememberCoroutineScope()
-    var command by rememberSaveable(state.session?.id) { mutableStateOf("") }
-    var sendingCommand by remember { mutableStateOf(false) }
-    val inputReady = state.sessionReady && terminalState.view != null && !sendingCommand
-    val sendCommand: () -> Unit = {
-        val view = terminalState.view
-        val terminal = state.terminal
-        if (inputReady && view != null) {
-            val text = command
-            command = ""
-            sendingCommand = true
-            coroutineScope.launch {
-                try {
-                    view.sendText(text)
-                    // Codex treats Enter within a text burst as a pasted newline.
-                    if (text.isNotEmpty()) delay(200)
-                    if (terminalState.view === view && view.session === terminal) {
-                        view.sendKey(KeyEvent.KEYCODE_ENTER)
-                    }
-                } finally {
-                    sendingCommand = false
-                }
-            }
-        }
-    }
+    val inputReady = state.sessionReady && terminalState.view != null
     Column(modifier) {
         Text(state.sessionStatus, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -304,20 +274,6 @@ private fun TerminalPage(state: CompanionState, modifier: Modifier) {
             GhosttyExtraKeysBar(state = terminalState, modifier = Modifier.weight(1f))
             Button(onClick = { terminalState.view?.sendKey(KeyEvent.KEYCODE_ENTER) },
                 enabled = inputReady, modifier = Modifier.padding(horizontal = 8.dp)) { Text("Enter") }
-        }
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = command,
-                onValueChange = { command = it },
-                label = { Text("Type a command") },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false, imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { if (inputReady) sendCommand() }),
-            )
-            Button(onClick = sendCommand, enabled = inputReady) { Text("Send") }
         }
     }
     GhosttyDialogs(terminalState)
