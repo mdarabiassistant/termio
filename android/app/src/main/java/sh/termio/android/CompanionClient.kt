@@ -194,8 +194,13 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
 
     private fun rosterDisconnected(socket: WebSocket) {
         if (socket !== rosterSocket || pairing == null) return
-        mutableState.update { it.copy(connected = false, status = "Reconnecting…",
-            error = if (it.hasRoster) it.error else "Couldn’t reach the Mac. Check Mobile Access and the address.") }
+        if (!state.value.hasRoster) {
+            stopConnections()
+            mutableState.update { it.copy(connected = false, status = "",
+                error = "Couldn’t connect to this Mac. Scan its QR code in Settings ▸ Mobile and try again.") }
+            return
+        }
+        mutableState.update { it.copy(connected = false, status = "Reconnecting…") }
         handler.removeCallbacks(retryRoster)
         handler.postDelayed(retryRoster, 2500)
     }
