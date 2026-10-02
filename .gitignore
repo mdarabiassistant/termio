@@ -36,6 +36,7 @@ android/.idea/
 android/build/
 android/app/build/
 android/local.properties
+/.android-release-signing/
 
 # Per-project termio session state
 /.termio/

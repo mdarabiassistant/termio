@@ -11,8 +11,8 @@ android {
         applicationId 'sh.termio.android'
         minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName '0.7-prototype'
+        versionCode Integer.parseInt(System.getenv('TERMIO_ANDROID_VERSION_CODE') ?: '8')
+        versionName System.getenv('TERMIO_ANDROID_VERSION') ?: '0.7.0'
     }
 
     compileOptions {
