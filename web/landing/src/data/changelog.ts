@@ -17,6 +17,19 @@ export type ChangelogEntry = {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "0.55.1",
+    date: "2026-10-02",
+    title: "Remote SSH sessions survive disconnects",
+    changes: {
+      new: [
+        "This fork publishes macOS DMGs through GitHub Releases. Install updates manually from the Releases page.",
+      ],
+      fixed: [
+        "SSH sessions opened from Settings and the host menu now stay on the remote machine across disconnects and app restarts.",
+      ],
+    },
+  },
+  {
     version: "0.55.0",
     date: "2026-09-21",
     title: "Highlights go into a PDF without rewriting it",
