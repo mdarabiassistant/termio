@@ -30,6 +30,7 @@
 #                    because Sparkle compares it (default: keep Info.plist's)
 #   SIGN_IDENTITY    codesign identity, e.g. "Developer ID Application: …" for a
 #                    notarizable build (default: "-", ad-hoc, for local use)
+#   TERMIO_DISABLE_UPDATES  set to "1" for manual updates in fork distributions
 #
 # `AppIcon.png` is the shipped icon. `AppIcon-dev.png` is the inverted icon for
 # local dev builds, so the two app bundles remain distinct in the Dock.
@@ -366,6 +367,11 @@ fi
 if [[ -n "${TERMIO_BUILD:-}" ]]; then
     echo "==> Stamping CFBundleVersion=$TERMIO_BUILD"
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $TERMIO_BUILD" "$plist"
+fi
+
+if [[ "${TERMIO_DISABLE_UPDATES:-}" == "1" ]]; then
+    /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$plist"
+    /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$plist"
 fi
 
 # Dev channel: suffix the bundle id (so LaunchServices, UserDefaults, and

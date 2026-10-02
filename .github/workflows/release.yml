@@ -1,38 +1,32 @@
 name: Release
 
-# Cut a release by pushing a version tag:
-#   git tag v0.1.0 && git push origin v0.1.0
-# The tag is the source of truth for the version; the build number is the commit
-# count (monotonic, so Sparkle always sees a higher CFBundleVersion). The DMG and
-# the Sparkle appcast.xml are hosted on Cloudflare R2 behind downloads.termio.sh,
-# which is where the app's SUFeedURL and the website's Download button point.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, such as v0.55.1"
+        required: true
+        type: string
+      publish:
+        description: "Publish a GitHub Release after verifying the DMG"
+        type: boolean
+        default: true
 
 concurrency:
   group: release
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   APP_NAME: termio
-  SPARKLE_VERSION: "2.9.3"
-  # Pin the toolchain to the macOS 26.4 SDK. AppKit keys titlebar/sidebar chrome off
-  # the SDK the app links against, and 26.5-linked builds drop the floating sidebar
-  # inset — the window title lands flush against the sidebar divider. Keep this in
-  # step with the local dev toolchain until the toolbar is adapted to the 26.5 chrome.
   DEVELOPER_DIR: /Applications/Xcode_26.4.app/Contents/Developer
-  # build-app.sh builds termiod into the bundle, and its VT engine is compiled by
-  # Zig from our libghostty fork. Pinned with its published checksum, exactly as
-  # .github/workflows/termiod.yml pins it — keep the two in step.
   ZIG_VERSION: "0.16.0"
   ZIG_SHA256_AARCH64_MACOS: "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
-  # The DMG lives at $DOWNLOAD_BASE_URL/v<version>/termio.dmg (immutable) with a
-  # stable $DOWNLOAD_BASE_URL/termio.dmg copy; the appcast at $DOWNLOAD_BASE_URL/
-  # appcast.xml (matches SUFeedURL in packaging/Info.plist).
-  DOWNLOAD_BASE_URL: https://downloads.termio.sh
-  R2_BUCKET: termio-downloads
 
 jobs:
   release:
@@ -42,7 +36,6 @@ jobs:
       contents: write
 
     steps:
-      # Full history so the commit count (build number) works.
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -50,44 +43,42 @@ jobs:
 
       - name: Derive version and build number
         id: meta
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [ -z "$VERSION" ]; then
-            echo "::error::Could not derive a version from tag '$GITHUB_REF_NAME'"
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo "::error::Releases must be built from the current main commit."
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$REQUESTED_TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Use a release tag such as v0.55.1 or v0.55.1-fork.1."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            if [[ "$(git rev-parse "$TAG^{commit}")" != "$GITHUB_SHA" ]]; then
+              echo "::error::The release tag points at a different commit."
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::This release already exists; choose a new version."
             exit 1
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "Releasing v$VERSION (build $BUILD_NUMBER)"
+          echo "Releasing $TAG (build $BUILD_NUMBER)"
 
-      # Import the Developer ID Application certificate into a throwaway keychain.
-      - name: Import signing certificate
-        env:
-          DEVELOPER_ID_CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
-          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
-        run: |
-          CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
-
-          echo "$DEVELOPER_ID_CERT_P12" | base64 --decode > "$CERT_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$DEVELOPER_ID_CERT_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: \
-            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-
-      # `libghostty-vt-sys` invokes `zig` by name and honours no env override, so
-      # the toolchain has to land on PATH under exactly that name. build-app.sh
-      # points the daemon's build at the Command Line Tools SDK itself — Xcode 26's
-      # libSystem.tbd is arm64e-only and Zig cannot link against it — and leaves
-      # DEVELOPER_DIR above intact for the Swift build.
-      - name: Install Zig (for termiod's VT engine)
+      - name: Install Zig
         run: |
           url="https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
           curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
@@ -96,226 +87,99 @@ jobs:
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
 
-      # build-app.sh embeds + signs Sparkle, builds and signs termiod into
-      # Contents/Resources, and Developer-ID-signs the bundle with the hardened
-      # runtime, so the output is ready to notarize.
-      - name: Build signed app bundle
+      - name: Build ad-hoc-signed universal app
         env:
-          SIGN_IDENTITY: "Developer ID Application"
+          SIGN_IDENTITY: "-"
+          TERMIO_DISABLE_UPDATES: "1"
           TERMIO_VERSION: ${{ steps.meta.outputs.version }}
           TERMIO_BUILD: ${{ steps.meta.outputs.build }}
         run: ./scripts/build-app.sh
 
       - name: Create DMG
         run: |
-          brew install create-dmg
-          APP="$PWD/${APP_NAME}.app"
+          staging="$RUNNER_TEMP/dmg-staging"
+          mkdir -p "$staging"
+          ditto "$PWD/${APP_NAME}.app" "$staging/${APP_NAME}.app"
+          ln -s /Applications "$staging/Applications"
           DMG_PATH="$RUNNER_TEMP/${APP_NAME}.dmg"
-
-          VOLICON_ARGS=()
-          ICNS="$APP/Contents/Resources/AppIcon.icns"
-          [ -f "$ICNS" ] && VOLICON_ARGS=(--volicon "$ICNS")
-
-          create-dmg \
-            --volname "$APP_NAME" \
-            "${VOLICON_ARGS[@]}" \
-            --window-pos 200 120 \
-            --window-size 660 400 \
-            --icon-size 160 \
-            --icon "${APP_NAME}.app" 180 170 \
-            --hide-extension "${APP_NAME}.app" \
-            --app-drop-link 480 170 \
-            --no-internet-enable \
-            "$DMG_PATH" \
-            "$APP"
-
+          hdiutil create -volname Termio -srcfolder "$staging" -format UDZO "$DMG_PATH"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
 
-      # What a user receives is the app *inside the DMG*, not the one the build
-      # left in the checkout — signing, notarization and the DMG copy all sit
-      # between them. The daemons are the payload that makes a remote machine
-      # work at all and they are plain files in Resources, so nothing else would
-      # notice them going missing: the app would install, launch, and fail only
-      # when someone pointed it at a VPS.
-      #
-      # The `termio` clients ship beside them and sit in exactly that position:
-      # a deploy refuses outright when the client slice for a box's target is
-      # missing (`remote::shipped_client`), so a lost one turns deploying from
-      # something that works into something that cannot be done at all.
-      - name: Verify the daemons and clients survived into the DMG
+      - name: Verify shipped app and backend
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_BUILD: ${{ steps.meta.outputs.build }}
         run: |
+          hdiutil verify "$DMG_PATH"
           mount_point="$RUNNER_TEMP/dmg-check"
           mkdir -p "$mount_point"
           hdiutil attach "$DMG_PATH" -mountpoint "$mount_point" -nobrowse -quiet
-          resources="$mount_point/${APP_NAME}.app/Contents/Resources"
-          status=0
-          for binary in \
-            "termiod:Mach-O" \
-            "termiod-x86_64-unknown-linux-musl:ELF 64-bit" \
-            "termiod-aarch64-unknown-linux-musl:ELF 64-bit" \
-            "termio:Mach-O" \
-            "termio-x86_64-unknown-linux-musl:ELF 64-bit" \
-            "termio-aarch64-unknown-linux-musl:ELF 64-bit"; do
-            name="${binary%%:*}"
-            want="${binary#*:}"
-            if [ ! -f "$resources/$name" ]; then
-              echo "error: $name is missing from the shipped app" >&2
-              status=1
-              continue
-            fi
-            got="$(file -b "$resources/$name")"
-            echo "$name: $got"
-            case "$got" in
-              *"$want"*) ;;
-              *) echo "error: $name is not a $want binary" >&2; status=1 ;;
-            esac
+          trap 'hdiutil detach "$mount_point" -quiet' EXIT
+          app="$mount_point/${APP_NAME}.app"
+          resources="$app/Contents/Resources"
+          plist="$app/Contents/Info.plist"
+          codesign --verify --strict --verbose=2 "$app"
+          for binary in "$app/Contents/MacOS/termio" "$resources/termiod" "$resources/termio"; do
+            codesign --verify --strict "$binary"
+            archs="$(lipo -archs "$binary")"
+            for arch in arm64 x86_64; do
+              if [[ " $archs " != *" $arch "* ]]; then
+                echo "::error::$binary is missing its $arch slice."
+                exit 1
+              fi
+            done
           done
-          hdiutil detach "$mount_point" -quiet
-          exit $status
-
-      # Notarize + staple the DMG. The app inside is already Developer-ID-signed
-      # with the hardened runtime and a secure timestamp, which notarization needs.
-      - name: Notarize and staple DMG
-        env:
-          ASC_API_KEY: ${{ secrets.ASC_API_KEY }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-        run: |
-          ASC_KEY_PATH="$RUNNER_TEMP/asc_api_key.p8"
-          echo "$ASC_API_KEY" | base64 --decode > "$ASC_KEY_PATH"
-
-          xcrun notarytool submit "$DMG_PATH" \
-            --key "$ASC_KEY_PATH" \
-            --key-id "$ASC_KEY_ID" \
-            --issuer "$ASC_ISSUER_ID" \
-            --wait
-
-          xcrun stapler staple "$DMG_PATH"
-
-      - name: Install Sparkle tools
-        run: |
-          curl -sL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz" \
-            | tar xJ -C "$RUNNER_TEMP" bin/sign_update bin/generate_appcast
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-
-      # generate_appcast reads the version from the app inside the (stapled) DMG,
-      # signs the DMG with the EdDSA private key, and points download URLs at this
-      # release's versioned R2 path. Download the existing appcast from R2 first so
-      # generate_appcast MERGES history rather than emitting only the newest item.
-      - name: Generate appcast
-        env:
-          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          APPCAST_DIR="$RUNNER_TEMP/appcast_dir"
-          mkdir -p "$APPCAST_DIR"
-
-          aws s3 cp "s3://$R2_BUCKET/appcast.xml" "$APPCAST_DIR/appcast.xml" \
-            --endpoint-url "$R2_ENDPOINT" \
-            || echo "::notice::No existing appcast.xml — generating fresh history"
-
-          cp "$DMG_PATH" "$APPCAST_DIR/"
-
-          echo "$SPARKLE_ED_KEY" | generate_appcast \
-            --ed-key-file - \
-            --download-url-prefix "$DOWNLOAD_BASE_URL/v${VERSION}/" \
-            "$APPCAST_DIR"
-
-          cp "$APPCAST_DIR/appcast.xml" "$RUNNER_TEMP/appcast.xml"
-
-      - name: Upload DMG + appcast to R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-
-          # Versioned copy — the immutable URL the appcast points at.
-          aws s3 cp "$DMG_PATH" \
-            "s3://$R2_BUCKET/v${VERSION}/${APP_NAME}.dmg" \
-            --endpoint-url "$R2_ENDPOINT"
-
-          # Stable "latest" copy — what the website Download button links to.
-          aws s3 cp "$DMG_PATH" \
-            "s3://$R2_BUCKET/${APP_NAME}.dmg" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --cache-control "no-cache"
-
-          aws s3 cp "$RUNNER_TEMP/appcast.xml" \
-            "s3://$R2_BUCKET/appcast.xml" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --cache-control "no-cache"
-
-      # The stable DMG + appcast change every release, so purge just those two from
-      # Cloudflare's edge so updates appear immediately. Versioned URLs are immutable
-      # and need no purge. No-ops (with a notice) until the secrets are set.
-      - name: Purge Cloudflare cache
-        env:
-          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-        run: |
-          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ZONE_ID" ]; then
-            echo "::notice::CLOUDFLARE_API_TOKEN/ZONE_ID not set — skipping cache purge (stable URLs follow the edge TTL)."
-            exit 0
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            for name in termiod termio; do
+              file "$resources/$name-$target" | grep -q "ELF 64-bit"
+            done
+          done
+          [[ -L "$mount_point/Applications" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" == "$RELEASE_VERSION" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" == "$RELEASE_BUILD" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$plist")" == "false" ]]
+          if /usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$plist" >/dev/null 2>&1; then
+            echo "::error::The fork must not use the upstream update feed."
+            exit 1
           fi
-          curl -sf -X POST \
-            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data '{"files":[
-              "'"$DOWNLOAD_BASE_URL/${APP_NAME}.dmg"'",
-              "'"$DOWNLOAD_BASE_URL/appcast.xml"'"
-            ]}' \
-            && echo "Purged stable DMG + appcast from Cloudflare cache"
 
-      # Record the release on GitHub for the tag + auto-generated changelog.
-      # Artifacts live on R2 (the private repo's own assets aren't public), so the
-      # download link leads the body — GitHub renders release titles as plain text,
-      # so a URL there is unclickable.
-      - name: Record GitHub Release
+      - name: Generate checksum
+        run: |
+          cd "$RUNNER_TEMP"
+          shasum -a 256 "${APP_NAME}.dmg" > "${APP_NAME}.dmg.sha256"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: termio-macos-${{ steps.meta.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/termio.dmg
+            ${{ runner.temp }}/termio.dmg.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          gh release create "v${VERSION}" \
-            --title "${APP_NAME} v${VERSION}" \
-            --notes "[Download ${APP_NAME} ${VERSION} for macOS]($DOWNLOAD_BASE_URL/v${VERSION}/${APP_NAME}.dmg)" \
-            --generate-notes
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          Download `termio.dmg`, open it, and drag Termio into Applications.
 
-      # Point the Homebrew tap (termio-sh/homebrew-tap) at this release so
-      # `brew install --cask termio-sh/tap/termio` serves it. Auth is a write
-      # deploy key on the tap repo. No-ops (with a notice) until the secret is set.
-      - name: Bump Homebrew cask
-        env:
-          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
-        run: |
-          if [ -z "$TAP_DEPLOY_KEY" ]; then
-            echo "::notice::TAP_DEPLOY_KEY not set — skipping Homebrew cask bump."
-            exit 0
-          fi
-          VERSION="${{ steps.meta.outputs.version }}"
-          SHA256=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)
+          This fork build supports Apple silicon and Intel Macs on macOS 14 or later. It is ad-hoc signed and is not notarized by Apple. If macOS blocks the first launch, open System Settings > Privacy & Security and choose Open Anyway.
 
-          KEY_FILE="$RUNNER_TEMP/tap_deploy_key"
-          echo "$TAP_DEPLOY_KEY" > "$KEY_FILE"
-          chmod 600 "$KEY_FILE"
-          export GIT_SSH_COMMAND="ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new"
+          Updates are installed manually from this repository's Releases page. The upstream automatic update feed is disabled.
 
-          git clone --depth 1 git@github.com:termio-sh/homebrew-tap.git "$RUNNER_TEMP/tap"
-          cd "$RUNNER_TEMP/tap"
-          sed -i '' \
-            -e "s/^  version .*/  version \"${VERSION}\"/" \
-            -e "s/^  sha256 .*/  sha256 \"${SHA256}\"/" \
-            Casks/termio.rb
-          git -c user.name="termio-release" -c user.email="release@termio.sh" \
-            commit -am "termio ${VERSION}"
-          git push
-          echo "Bumped cask to ${VERSION} (${SHA256})"
-
-      - name: Cleanup keychain
-        if: always()
-        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          SSH sessions created from Settings and the host menu now remain on the remote machine across disconnects and app restarts.
+          EOF
+          flags=()
+          [[ "$RELEASE_TAG" == *-* ]] && flags+=(--prerelease)
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] && flags+=(--verify-tag)
+          gh release create "$RELEASE_TAG" \
+            "$DMG_PATH" "$DMG_PATH.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "Termio $RELEASE_TAG (macOS)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "${flags[@]}"
