@@ -64,7 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
     #else
     private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        startingUpdater: Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil,
+        updaterDelegate: nil, userDriverDelegate: nil)
     #endif
     // Folders handed to us by the `termio` CLI (via `open -b sh.termio.app <dir>`)
     // before the window exists, replayed once it does. macOS may deliver the open
@@ -2335,6 +2336,8 @@ extension AppDelegate: NSMenuItemValidation {
     /// matching the pre-validation behavior.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(checkForUpdates(_:)):
+            return updaterController.updater.canCheckForUpdates
         case #selector(nextSession(_:)), #selector(previousSession(_:)):
             return !store.sidebarSessionGroups.isEmpty
         case #selector(newWorktree(_:)), #selector(newPullRequest(_:)):
