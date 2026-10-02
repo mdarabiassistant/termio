@@ -1,0 +1,190 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "android-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Android release tag, such as android-v0.7.0"
+        required: true
+        type: string
+      publish:
+        description: "Publish a GitHub Release after verifying the APK"
+        type: boolean
+        default: true
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Derive version and build number
+        id: meta
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo "::error::Releases must be built from the current main commit."
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$REQUESTED_TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          if [[ ! "$TAG" =~ ^android-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Use an Android release tag such as android-v0.7.0."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            if [[ "$(git rev-parse "$TAG^{commit}")" != "$GITHUB_SHA" ]]; then
+              echo "::error::The release tag points at a different commit."
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::This release already exists; choose a new version."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-37.0 build-tools;36.0.0"
+          log-accepted-android-sdk-licenses: "false"
+
+      - name: Build and validate release APK
+        working-directory: android
+        env:
+          TERMIO_ANDROID_VERSION: ${{ steps.meta.outputs.version }}
+          TERMIO_ANDROID_VERSION_CODE: ${{ steps.meta.outputs.build }}
+        run: ./gradlew --no-daemon :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
+
+      - name: Sign and verify APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_BUILD: ${{ steps.meta.outputs.build }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD."
+            exit 1
+          fi
+          umask 077
+          keystore="$RUNNER_TEMP/termio-release.p12"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$build_tools/zipalign" -P 16 -f 4 \
+            android/app/build/outputs/apk/release/app-release-unsigned.apk \
+            "$RUNNER_TEMP/termio-aligned.apk"
+          APK_PATH="$RUNNER_TEMP/termio-android.apk"
+          "$build_tools/apksigner" sign \
+            --ks "$keystore" --ks-key-alias termio \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --v4-signing-enabled false \
+            --out "$APK_PATH" "$RUNNER_TEMP/termio-aligned.apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$APK_PATH" \
+            | tee "$RUNNER_TEMP/apk-signature.txt"
+          keytool -exportcert -keystore "$keystore" -alias termio \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD \
+            -file "$RUNNER_TEMP/termio-signing-cert.der"
+          cert_sha256="$(sha256sum "$RUNNER_TEMP/termio-signing-cert.der" | cut -d ' ' -f 1)"
+          grep -Fq "Signer #1 certificate SHA-256 digest: $cert_sha256" "$RUNNER_TEMP/apk-signature.txt"
+          "$build_tools/zipalign" -c -P 16 4 "$APK_PATH"
+          [[ "$(apkanalyzer manifest application-id "$APK_PATH")" == "sh.termio.android" ]]
+          [[ "$(apkanalyzer manifest version-name "$APK_PATH")" == "$RELEASE_VERSION" ]]
+          [[ "$(apkanalyzer manifest version-code "$APK_PATH")" == "$RELEASE_BUILD" ]]
+          [[ "$(apkanalyzer manifest min-sdk "$APK_PATH")" == "26" ]]
+          [[ "$(apkanalyzer manifest debuggable "$APK_PATH")" == "false" ]]
+          python3 - "$APK_PATH" <<'PY'
+          import sys
+          import zipfile
+          with zipfile.ZipFile(sys.argv[1]) as apk:
+              paths = apk.namelist()
+              for architecture in ("arm64-v8a", "armeabi-v7a", "x86", "x86_64"):
+                  if not any(path.startswith(f"lib/{architecture}/") and path.endswith(".so") for path in paths):
+                      raise SystemExit(f"Missing native libraries for {architecture}")
+          PY
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "SIGNING_CERT_SHA256=$cert_sha256" >> "$GITHUB_ENV"
+
+      - name: Generate checksum
+        run: |
+          cd "$RUNNER_TEMP"
+          sha256sum termio-android.apk > termio-android.apk.sha256
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: termio-android-${{ steps.meta.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/termio-android.apk
+            ${{ runner.temp }}/termio-android.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Android release
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_BUILD: ${{ steps.meta.outputs.build }}
+        run: |
+          cat > "$RUNNER_TEMP/android-release-notes.md" <<'EOF'
+          Download `termio-android.apk` on your Android device and open it to install. If Android asks, allow your browser or file manager to install this APK.
+
+          This prototype supports Android 8.0 or later on ARM and x86 devices. It includes QR pairing, saved connections to multiple Macs, native terminal rendering, and direct keyboard input.
+
+          Turn off Direct Attach in Settings > Mobile on your Mac, then scan its QR code in the Android app.
+
+          The APK uses this fork's release signing key. An earlier debug-signed prototype must be uninstalled before this APK can be installed. Uninstalling removes the saved Mac connections from the phone; sessions on the Macs keep running.
+          EOF
+          printf '\nVersion: %s (build %s)\nSigning certificate SHA-256: `%s`\n' \
+            "$RELEASE_VERSION" "$RELEASE_BUILD" "$SIGNING_CERT_SHA256" \
+            >> "$RUNNER_TEMP/android-release-notes.md"
+          flags=(--prerelease --latest=false)
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] && flags+=(--verify-tag)
+          gh release create "$RELEASE_TAG" \
+            "$APK_PATH" "$APK_PATH.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "Termio Android $RELEASE_VERSION (prototype)" \
+            --notes-file "$RUNNER_TEMP/android-release-notes.md" \
+            "${flags[@]}"
