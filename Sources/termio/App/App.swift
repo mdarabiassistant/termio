@@ -184,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.global(qos: .utility).async {
             TermioStore.reconcileLocalDaemon()
         }
-        store.refreshDeviceSessions()
+        store.refreshKnownDeviceSessions()
         LaunchTrace.mark("store restored")
         // Task-completion notifications: the delegate must be installed before a
         // notification click can arrive, so wire it before any session runs.

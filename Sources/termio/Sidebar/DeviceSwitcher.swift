@@ -11,11 +11,9 @@ import TermioShared
 enum DeviceRoster {
     /// This Mac, then every machine Termio has actually worked on, by alias.
     ///
-    /// A machine qualifies two ways: a `hello_ok` recorded it in the device
-    /// registry, or a session in the tree says it runs there. The second source
-    /// matters on the launch after an upgrade — a state file can name a host the
-    /// registry has not re-learned yet, and a device the user can see sessions on
-    /// must not be missing from the switcher.
+    /// A completed handshake, workspace, or session can name a known route.
+    /// Persisted workspaces matter even when empty: the device's sessions may
+    /// have been started by another client since this app last connected.
     static func known(in store: TermioStore) -> [KnownDevice] {
         var deviceIDByAlias: [String: String] = [:]
         for device in TermiodDeviceRegistry.shared.all {
@@ -24,9 +22,16 @@ enum DeviceRoster {
             }
         }
         var aliases = Set(deviceIDByAlias.keys)
-        for project in store.projects {
-            for session in project.sessions {
-                if let host = session.termiodRemoteHost { aliases.insert(host) }
+        for workspace in store.workspaces {
+            if let alias = workspace.deviceAlias {
+                aliases.insert(alias)
+                if deviceIDByAlias[alias] == nil { deviceIDByAlias[alias] = workspace.deviceID }
+            }
+        }
+        for session in store.allSessions {
+            if let alias = session.termiodRemoteHost {
+                aliases.insert(alias)
+                if deviceIDByAlias[alias] == nil { deviceIDByAlias[alias] = session.deviceID }
             }
         }
         // This Mac always leads — not because it is special, but because it is the
