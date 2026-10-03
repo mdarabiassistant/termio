@@ -31,6 +31,42 @@ final class DeviceSettingsTests: XCTestCase {
         XCTAssertEqual(KnownDevice.thisMac.settingsKey, "local")
     }
 
+    func testRemoteSettingsPreferConfiguredNameOverHistoricalAddress() {
+        let address = KnownDevice(alias: "192.0.2.1", deviceID: "h_box")
+        let named = KnownDevice(alias: "build-box", deviceID: "h_box")
+
+        XCTAssertEqual(KnownDevice.remoteSettingsMachines(
+            known: [.thisMac, address, named], configuredAliases: ["build-box"]), [named])
+    }
+
+    func testRemoteSettingsShowOneRowWhenBothRoutesAreConfigured() {
+        let first = KnownDevice(alias: "box-lan", deviceID: "h_box")
+        let second = KnownDevice(alias: "box-wan", deviceID: "h_box")
+
+        XCTAssertEqual(KnownDevice.remoteSettingsMachines(
+            known: [first, second], configuredAliases: ["box-lan", "box-wan"]), [first])
+    }
+
+    func testRemoteSettingsKeepDistinctAndUnresolvedMachines() {
+        let first = KnownDevice(alias: "first", deviceID: "h_first")
+        let second = KnownDevice(alias: "second", deviceID: "h_second")
+        let unresolved = KnownDevice(alias: "unresolved", deviceID: nil)
+        let unused = KnownDevice(alias: "unused", deviceID: nil)
+
+        XCTAssertEqual(KnownDevice.remoteSettingsMachines(
+            known: [.thisMac, first, second, unresolved],
+            configuredAliases: ["first", "second", "unresolved", "unused", "unused"]),
+            [first, second, unresolved, unused])
+    }
+
+    func testRemoteSettingsDeduplicateHistoryWithoutConfiguredAliases() {
+        let first = KnownDevice(alias: "192.0.2.1", deviceID: "h_box")
+        let second = KnownDevice(alias: "192.0.2.2", deviceID: "h_box")
+
+        XCTAssertEqual(KnownDevice.remoteSettingsMachines(
+            known: [.thisMac, first, second], configuredAliases: []), [first])
+    }
+
     // MARK: Storage
 
     func testAuthoredValuesSurviveTheRoundTripToJSON() {
