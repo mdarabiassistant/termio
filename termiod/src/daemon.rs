@@ -194,6 +194,14 @@ impl Manager {
             self.events.clone(),
         )
         .context("spawning session")?;
+        if let Some(custom_name) = spec.custom_name {
+            let (reply, _) = oneshot::channel();
+            handle.send(SessionMsg::SetName {
+                custom_name: Some(custom_name),
+                if_unset: true,
+                reply,
+            });
+        }
         guard.sessions.insert(id.clone(), handle);
         Ok(id)
     }
@@ -2340,6 +2348,48 @@ async fn process_control(
                 });
             }
         }
+        Control::SetName {
+            id,
+            custom_name,
+            if_unset,
+            seq,
+        } => {
+            let response = if !connection.capabilities.contains("session_names") {
+                error(
+                    seq,
+                    ErrorCode::Denied,
+                    "the session_names capability was not negotiated",
+                    false,
+                )
+            } else if let Some(handle) = manager.resolve(&id).await {
+                let (tx, rx) = oneshot::channel();
+                handle.send(SessionMsg::SetName {
+                    custom_name,
+                    if_unset,
+                    reply: tx,
+                });
+                match rx.await {
+                    Ok(session) => {
+                        manager.graveyard.note_live(&session);
+                        Control::NameSet { session, re: seq }
+                    }
+                    Err(_) => error(
+                        seq,
+                        ErrorCode::AlreadyExited,
+                        "session already exited",
+                        false,
+                    ),
+                }
+            } else {
+                error(
+                    seq,
+                    ErrorCode::NoSuchSession,
+                    format!("no such session: {id}"),
+                    false,
+                )
+            };
+            send_response(out, response_cache, seq, response);
+        }
         Control::SetStatus {
             id,
             status,
@@ -2492,6 +2542,7 @@ async fn process_control(
         | Control::Ok { .. }
         | Control::Created { .. }
         | Control::Sessions { .. }
+        | Control::NameSet { .. }
         | Control::Attached { .. }
         | Control::Exited { .. }
         | Control::WaitResult { .. }

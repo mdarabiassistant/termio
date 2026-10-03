@@ -1263,7 +1263,7 @@ extension TermioStore {
         // sensible label instead of to whatever it was once called.
         let composed = name == effectiveAgent(for: session).displayName
             || Self.isAutoTerminalName(name)
-        updateSession(id) { $0.givenTitle = composed ? nil : name }
+        setSessionName(composed ? nil : name, for: id)
     }
 
     /// The user-facing "Close Session": the same teardown as `closeSession`, but it

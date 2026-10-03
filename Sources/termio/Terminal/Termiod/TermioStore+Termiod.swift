@@ -52,14 +52,15 @@ extension TermioStore {
                 argv: argv,
                 env: env.map { [$0.key, $0.value] },
                 rows: UInt16(clamping: lastHostGridRows),
-                cols: UInt16(clamping: lastHostGridColumns))
+                cols: UInt16(clamping: lastHostGridColumns),
+                customName: session.givenTitle)
             : Termiod.CreateSpecification(
                 cwd: session.termiodRemoteCwd ?? "",
                 argv: [],
                 env: Self.presentationEnvironment(from: env),
                 rows: UInt16(clamping: lastHostGridRows),
                 cols: UInt16(clamping: lastHostGridColumns),
-                command: command)
+                command: command, customName: session.givenTitle)
         let opening = viewport ?? TerminalGrid(
             rows: UInt16(clamping: lastHostGridRows), cols: UInt16(clamping: lastHostGridColumns))
         return TermiodSessionLink(
@@ -129,6 +130,7 @@ extension TermioStore {
         // shrinking the window in which a close would journal a stale one.
         link.onDaemonSessionID = { [weak self] daemonID in
             self?.recordDaemonSessionID(daemonID, for: session.id)
+            self?.uploadSessionName(for: session.id)
         }
         // The `events` half of the negotiated capabilities. Status is the one
         // that matters: an agent running on a VPS reports to the daemon that
@@ -925,6 +927,7 @@ extension TermioStore {
     func adoptDeviceSession(_ information: Termiod.SessionInformation, on device: KnownDevice) {
         var session = Session(title: information.displayLabel, agent: .terminal)
         session.givenTitle = information.givenName
+        session.acceptDaemonName(information)
         session.termiodSessionName = Self.daemonKey(information)
         session.termiodDaemonID = information.id.isEmpty ? nil : information.id
         session.termiodRemoteHost = device.alias
@@ -1193,7 +1196,12 @@ extension TermioStore {
     func recordDaemonSessionID(_ daemonID: String, for id: Session.ID) {
         guard !daemonID.isEmpty, let session = session(id),
               session.termiodDaemonID != daemonID else { return }
-        updateSession(id) { $0.termiodDaemonID = daemonID }
+        updateSession(id) {
+            $0.termiodDaemonID = daemonID
+            $0.customNameRevision = nil
+            $0.prepareNameBackfill()
+        }
+        uploadSessionName(for: id)
     }
 
     /// Writes the daemon's own id onto every row the roster answers for, so a
@@ -1204,13 +1212,56 @@ extension TermioStore {
     private func recordDaemonIDs(from live: [Termiod.SessionInformation], for device: KnownDevice) {
         let mine = sessions(authoredFor: device)
         guard !mine.isEmpty else { return }
-        var idsByName: [String: String] = [:]
+        var idsByName: [String: Termiod.SessionInformation] = [:]
         for information in live where !information.id.isEmpty {
-            idsByName[Self.daemonKey(information)] = information.id
+            idsByName[Self.daemonKey(information)] = information
         }
         for session in mine {
-            guard let daemonID = idsByName[daemonSessionName(for: session)] else { continue }
-            recordDaemonSessionID(daemonID, for: session.id)
+            guard let information = idsByName[daemonSessionName(for: session)] else { continue }
+            recordDaemonSessionID(information.id, for: session.id)
+            updateSession(session.id) {
+                $0.prepareNameBackfill()
+                $0.acceptDaemonName(information)
+            }
+            if information.customNameRevision != nil { uploadSessionName(for: session.id) }
+        }
+    }
+
+    func setSessionName(_ name: String?, for id: Session.ID) {
+        updateSession(id) { $0.chooseName(name) }
+        uploadSessionName(for: id)
+    }
+
+    /// One request at a time per row keeps rapid edits ordered. Failed writes
+    /// remain queued and retry on the next roster fetch or attachment.
+    func uploadSessionName(for id: Session.ID) {
+        guard let session = session(id), let pending = session.pendingName,
+              let daemonID = session.termiodDaemonID,
+              sessionNameUploads.insert(id).inserted else { return }
+        let route = TermiodRoute(sshAlias: session.termiodRemoteHost)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result: Termiod.SessionInformation?
+            do {
+                result = try Termiod.setSessionName(
+                    target: daemonID, name: pending.value, ifUnset: pending.ifUnset, route: route)
+            } catch {
+                Log.termiod.error("Session name upload failed: \(error.localizedDescription)")
+                result = nil
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.sessionNameUploads.remove(id)
+                guard let current = self.session(id), current.termiodDaemonID == daemonID else { return }
+                guard let result else { return }
+                if current.pendingName?.token == pending.token {
+                    self.updateSession(id) {
+                        $0.pendingName = nil
+                        $0.acceptDaemonName(result)
+                    }
+                } else {
+                    self.uploadSessionName(for: id)
+                }
+            }
         }
     }
 

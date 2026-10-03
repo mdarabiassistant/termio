@@ -124,6 +124,10 @@ pub struct CarriedSession {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub custom_name: Option<String>,
+    #[serde(default)]
+    pub custom_name_revision: u64,
+    #[serde(default)]
     pub workstream: Option<crate::protocol::WorkstreamSpec>,
     /// The PTY master, as a descriptor number in the process about to `execve`.
     ///
@@ -645,6 +649,8 @@ mod tests {
             created_unix: 0,
             status: "unknown".to_string(),
             title: None,
+            custom_name: None,
+            custom_name_revision: 0,
             workstream: None,
             master_fd: -1,
             ring_len,

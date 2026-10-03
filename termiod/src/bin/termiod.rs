@@ -528,6 +528,7 @@ async fn main() -> Result<()> {
             let (rows, cols) = client::term_size();
             let spec = CreateSpec {
                 name,
+                custom_name: None,
                 cwd,
                 argv,
                 command: None,
@@ -730,6 +731,7 @@ async fn main() -> Result<()> {
                 };
                 Some(CreateSpec {
                     name: Some(target.clone()),
+                    custom_name: None,
                     cwd,
                     argv,
                     command: None,

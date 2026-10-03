@@ -466,6 +466,40 @@ struct Session: Identifiable, Hashable, Codable {
     /// indistinguishable from one the user typed.
     var givenTitle: String?
 
+    struct PendingName: Codable, Hashable, Sendable {
+        var token = UUID()
+        var value: String?
+        var ifUnset: Bool
+    }
+
+    /// Persist queued edits, including an explicit clear, across offline restarts.
+    var pendingName: PendingName?
+    var daemonNameInitialized = false
+    var customNameRevision: UInt64?
+
+    mutating func chooseName(_ name: String?) {
+        givenTitle = name
+        daemonNameInitialized = true
+        pendingName = PendingName(value: name, ifUnset: false)
+    }
+
+    mutating func prepareNameBackfill() {
+        guard !daemonNameInitialized, pendingName == nil,
+              termiodSessionName == nil, let givenTitle else { return }
+        // Older adopted rows stored guesses such as "zsh" in givenTitle.
+        // Only the client that authored a row may migrate its old name.
+        pendingName = PendingName(value: givenTitle, ifUnset: true)
+        daemonNameInitialized = true
+    }
+
+    mutating func acceptDaemonName(_ information: Termiod.SessionInformation) {
+        guard pendingName == nil, let revision = information.customNameRevision,
+              revision >= (customNameRevision ?? 0) else { return }
+        givenTitle = information.customName
+        customNameRevision = revision
+        daemonNameInitialized = true
+    }
+
     /// Which agent (or plain shell) this session runs.
     var agent: AgentPreset
     var createdAt: Date
@@ -632,7 +666,7 @@ struct Session: Identifiable, Hashable, Codable {
         case id, title, agent, createdAt, worktreePath, resumeID, launched, launchedAt,
              liveTitle, promptTitle, lastWorkingDirectory, spawnDirectory, sshHost, pinned,
              termiodRemoteHost, termiodRemoteCwd, deviceID, termiodSessionName,
-             termiodDaemonID, givenTitle
+             termiodDaemonID, givenTitle, pendingName, daemonNameInitialized, customNameRevision
     }
 
     /// The name to recover from a state file written before `givenTitle` existed,
@@ -683,8 +717,13 @@ struct Session: Identifiable, Hashable, Codable {
         termiodSessionName = try container.decodeIfPresent(
             String.self, forKey: .termiodSessionName)
         termiodDaemonID = try container.decodeIfPresent(String.self, forKey: .termiodDaemonID)
+        daemonNameInitialized = try container.decodeIfPresent(Bool.self, forKey: .daemonNameInitialized) ?? false
+        pendingName = try container.decodeIfPresent(PendingName.self, forKey: .pendingName)
+        customNameRevision = try container.decodeIfPresent(UInt64.self, forKey: .customNameRevision)
         givenTitle = try container.decodeIfPresent(String.self, forKey: .givenTitle)
-            ?? Self.recoveredGivenTitle(title, agent: agent, remoteHost: termiodRemoteHost)
+        if givenTitle == nil && !daemonNameInitialized {
+            givenTitle = Self.recoveredGivenTitle(title, agent: agent, remoteHost: termiodRemoteHost)
+        }
     }
 }
 

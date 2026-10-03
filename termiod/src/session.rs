@@ -113,6 +113,11 @@ pub enum SessionMsg {
     Inject {
         data: Vec<u8>,
     },
+    SetName {
+        custom_name: Option<String>,
+        if_unset: bool,
+        reply: oneshot::Sender<SessionInfo>,
+    },
     SetStatus {
         status: String,
         title: Option<String>,
@@ -365,6 +370,8 @@ struct Session {
     created_unix: u64,
     status: String,
     title: Option<String>,
+    custom_name: Option<String>,
+    custom_name_revision: u64,
     workstream: Option<WorkstreamSpec>,
     pty: Arc<Pty>,
     /// A dedicated writer prevents blocked PTY writes from stalling reads.
@@ -461,6 +468,8 @@ impl Session {
                 .filter(|project| !project.is_empty())
                 .or_else(|| self.foreground.current().repo_root.clone()),
             title: self.title.clone(),
+            custom_name: self.custom_name.clone(),
+            custom_name_revision: self.custom_name_revision,
             attached_clients: self.clients.len(),
             writer_client_id: self.writer.as_ref().map(ClientId::to_string),
             foreground_pid: self.foreground.current().pid,
@@ -527,6 +536,8 @@ impl Session {
                 created_unix: self.created_unix,
                 status: self.status.clone(),
                 title: self.title.clone(),
+                custom_name: self.custom_name.clone(),
+                custom_name_revision: self.custom_name_revision,
                 workstream: self.workstream.clone(),
                 // Assigned by `handoff::pack`, at the moment this session is
                 // committed to the blob.
@@ -1817,6 +1828,8 @@ pub fn spawn(
             created_unix,
             status: "unknown".to_string(),
             title: None,
+            custom_name: None,
+            custom_name_revision: 0,
             workstream,
             status_clocks: None,
         },
@@ -1862,6 +1875,8 @@ pub fn adopt(
             created_unix: carried.created_unix,
             status: carried.status,
             title: carried.title,
+            custom_name: carried.custom_name,
+            custom_name_revision: carried.custom_name_revision,
             workstream: carried.workstream,
             status_clocks: carried.status_clocks,
         },
@@ -1929,6 +1944,8 @@ struct Facts {
     created_unix: u64,
     status: String,
     title: Option<String>,
+    custom_name: Option<String>,
+    custom_name_revision: u64,
     workstream: Option<WorkstreamSpec>,
     /// How long the carried status has been true. `None` for a fresh spawn,
     /// which has no history to keep.
@@ -1978,6 +1995,8 @@ fn start(
         created_unix: facts.created_unix,
         status: facts.status,
         title: facts.title,
+        custom_name: facts.custom_name,
+        custom_name_revision: facts.custom_name_revision,
         workstream: facts.workstream,
         pty,
         input_tx,
@@ -2882,6 +2901,19 @@ fn handle_msg(session: &mut Session, msg: SessionMsg) -> Option<EndReason> {
         SessionMsg::Inject { data } => {
             let _ = session.input_tx.send(data);
         }
+        SessionMsg::SetName {
+            custom_name,
+            if_unset,
+            reply,
+        } => {
+            // Backfilling an older client must never resurrect a cleared name.
+            if !if_unset || session.custom_name_revision == 0 {
+                session.custom_name = custom_name;
+                session.custom_name_revision = session.custom_name_revision.saturating_add(1);
+            }
+            // Names are fetched with the roster; a rename emits no event.
+            let _ = reply.send(session.info());
+        }
         SessionMsg::SetStatus {
             status,
             title,
@@ -3214,6 +3246,8 @@ mod tests {
                 created_unix: 0,
                 status: "unknown".to_string(),
                 title: None,
+                custom_name: None,
+                custom_name_revision: 0,
                 workstream: None,
                 pty,
                 input_tx,
@@ -3238,6 +3272,42 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn names_are_pull_based_and_legacy_backfill_cannot_undo_a_clear() {
+        let (tx, _rx) = std_mpsc::channel();
+        let (mut session, mut events) = test_session(tx, Arc::new(SidecarQueue::new()));
+        session.title = Some("automatic title".into());
+        for (name, if_unset, expected, revision) in [
+            (Some("build-λ"), true, Some("build-λ"), 1),
+            (Some("renamed"), false, Some("renamed"), 2),
+            (Some("stale client"), true, Some("renamed"), 2),
+            (None, false, None, 3),
+            (Some("stale client"), true, None, 3),
+        ] {
+            let (reply, answer) = oneshot::channel();
+            handle_msg(
+                &mut session,
+                SessionMsg::SetName {
+                    custom_name: name.map(str::to_string),
+                    if_unset,
+                    reply,
+                },
+            );
+            let info = answer.await.unwrap();
+            assert_eq!(info.custom_name.as_deref(), expected);
+            assert_eq!(info.custom_name_revision, revision);
+            assert_eq!(info.name, "test");
+            assert_eq!(info.title.as_deref(), Some("automatic title"));
+            assert!(events.try_recv().is_err(), "rename must not broadcast");
+        }
+        session.custom_name = Some("survives handoff".into());
+        let carried = session.into_carried().unwrap();
+        let encoded = serde_json::to_vec(&carried.info).unwrap();
+        let decoded: crate::handoff::CarriedSession = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.custom_name.as_deref(), Some("survives handoff"));
+        assert_eq!(decoded.custom_name_revision, 3);
     }
 
     /// Hand the session the sidecar replies it is waiting on. `run` does this in
@@ -4439,6 +4509,8 @@ mod tests {
             created_unix: 0,
             status: "unknown".to_string(),
             title: None,
+            custom_name: None,
+            custom_name_revision: 0,
             workstream: None,
             pty,
             input_tx,

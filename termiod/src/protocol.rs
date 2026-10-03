@@ -48,6 +48,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "handoff",
     "viewport",
     "spawn_command",
+    "session_names",
 ];
 /// Snapshot payload carrying packed cells.
 ///
@@ -496,6 +497,8 @@ pub struct CreateSpec {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub custom_name: Option<String>,
+    #[serde(default)]
     pub cwd: Option<String>,
     /// argv[0] is the program. Empty ⇒ the daemon picks the login shell.
     #[serde(default)]
@@ -537,6 +540,7 @@ impl Default for CreateSpec {
     fn default() -> Self {
         CreateSpec {
             name: None,
+            custom_name: None,
             cwd: None,
             argv: Vec::new(),
             command: None,
@@ -915,6 +919,20 @@ pub enum Control {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
     },
+    /// A user label, independent of the stable attach name and OSC title.
+    SetName {
+        id: String,
+        #[serde(default)]
+        custom_name: Option<String>,
+        #[serde(default)]
+        if_unset: bool,
+        #[serde(default)]
+        seq: Option<u64>,
+    },
+    NameSet {
+        session: SessionInfo,
+        re: Option<u64>,
+    },
     /// Report a session's agent status.
     ///
     /// Everything past `title` used to reach only the Mac app's own socket: the
@@ -1290,6 +1308,7 @@ impl Control {
             | Control::UploadCommit { seq, .. }
             | Control::UploadAbort { seq, .. }
             | Control::Wait { seq, .. }
+            | Control::SetName { seq, .. }
             | Control::SetStatus { seq, .. }
             | Control::InstallAgents { seq, .. }
             | Control::ProbeAgents { seq, .. } => *seq,
@@ -1538,6 +1557,10 @@ pub struct SessionInfo {
     pub project: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub custom_name: Option<String>,
+    #[serde(default)]
+    pub custom_name_revision: u64,
     #[serde(default)]
     pub attached_clients: usize,
     #[serde(default)]
@@ -2448,6 +2471,8 @@ mod tests {
             agent_id: Some("claude".to_string()),
             project: Some("/work".to_string()),
             title: None,
+            custom_name: None,
+            custom_name_revision: 0,
             attached_clients: 0,
             writer_client_id: None,
             foreground_pid: None,

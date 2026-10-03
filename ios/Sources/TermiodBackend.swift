@@ -1002,7 +1002,7 @@ private extension MockSession {
             // there, so a chat would read `terminal` rather than `Terminal`.
             // Without a declared agent it is what names the program actually
             // running (`zsh`) instead of the daemon's uuid handle.
-            title: title ?? (declared ? agent.name : information.displayLabel),
+            title: information.customName ?? title ?? (declared ? agent.name : information.displayLabel),
             project: containerName,
             agent: agent,
             status: SessionStatus(wire: revision?.status ?? information.status),
