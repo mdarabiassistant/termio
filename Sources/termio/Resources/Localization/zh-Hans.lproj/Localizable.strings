@@ -348,6 +348,8 @@
 	<string>全部折叠</string>
 	<key>Collapse Results</key>
 	<string>折叠结果</string>
+	<key>Collapsed</key>
+	<string>已折叠</string>
 	<key>Command</key>
 	<string>命令</string>
 	<key>Command Palette…</key>
@@ -570,6 +572,8 @@
 	<string>退出状态 %lld。</string>
 	<key>Expand Results</key>
 	<string>展开结果</string>
+	<key>Expanded</key>
+	<string>已展开</string>
 	<key>Family</key>
 	<string>系列</string>
 	<key>File</key>
