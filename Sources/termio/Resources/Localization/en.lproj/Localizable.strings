@@ -348,6 +348,8 @@
 	<string>Collapse All</string>
 	<key>Collapse Results</key>
 	<string>Collapse Results</string>
+	<key>Collapsed</key>
+	<string>Collapsed</string>
 	<key>Command</key>
 	<string>Command</string>
 	<key>Command Palette…</key>
@@ -570,6 +572,8 @@
 	<string>Exited with status %lld.</string>
 	<key>Expand Results</key>
 	<string>Expand Results</string>
+	<key>Expanded</key>
+	<string>Expanded</string>
 	<key>Family</key>
 	<string>Family</string>
 	<key>File</key>

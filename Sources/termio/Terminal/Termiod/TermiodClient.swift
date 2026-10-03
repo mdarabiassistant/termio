@@ -379,7 +379,12 @@ extension Termiod {
         if !options.setsConnectTimeout {
             arguments += ["-o", "ConnectTimeout=\(connectTimeoutSeconds)"]
         }
-        if options.leavesMultiplexingToUs, let controlPath {
+        // OpenSSH first binds ControlPath + "." + 16 random characters,
+        // then renames it. The temporary path and its terminating NUL must
+        // fit too, or a valid-looking ControlPath still prevents every attach.
+        let socketPathCapacity = MemoryLayout.size(ofValue: sockaddr_un().sun_path)
+        if options.leavesMultiplexingToUs, let controlPath,
+           controlPath.utf8.count + 17 < socketPathCapacity {
             arguments += ["-o", "ControlMaster=auto",
                           "-o", "ControlPath=\(controlPath)",
                           "-o", "ControlPersist=10m"]
@@ -387,15 +392,11 @@ extension Termiod {
         return arguments
     }
 
-    /// `nil` when multiplexing has to be skipped for this host. A Unix socket
-    /// path is capped at 104 bytes, and an over-long `ControlPath` makes ssh
-    /// fail outright rather than degrade. An unusually long temporary directory
-    /// must cost multiplexing, never the session.
+    /// `nil` when the private socket directory cannot be created. Length is
+    /// checked when choosing SSH arguments, including OpenSSH's temporary suffix.
     private static func controlPath(for host: String) -> String? {
         guard let directory = controlSocketDirectory() else { return nil }
-        let path = directory.appendingPathComponent(controlSocketName(for: host)).path
-        guard path.utf8.count < 100 else { return nil }
-        return path
+        return directory.appendingPathComponent(controlSocketName(for: host)).path
     }
 
     /// The three lines of `ssh -G <host>`'s fully-resolved config that decide

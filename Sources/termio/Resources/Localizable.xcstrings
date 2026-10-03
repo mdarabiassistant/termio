@@ -1682,6 +1682,16 @@
         }
       }
     },
+    "Collapsed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已折叠"
+          }
+        }
+      }
+    },
     "Command": {
       "localizations": {
         "zh-Hans": {
@@ -2779,6 +2789,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "展开结果"
+          }
+        }
+      }
+    },
+    "Expanded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展开"
           }
         }
       }

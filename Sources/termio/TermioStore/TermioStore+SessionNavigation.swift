@@ -1,5 +1,60 @@
 import Foundation
 
+/// Groups existing workspace layouts without moving or reclassifying their contents.
+struct SidebarMachineGroup: Identifiable {
+    let id: String
+    let device: KnownDevice
+    var name: String
+    var workspaces: [Workspace] = []
+
+    static func groups(
+        workspaces: [Workspace], knownDevices: [KnownDevice],
+        localMachineName: String = MacIdentity.displayName
+    ) -> [SidebarMachineGroup] {
+        var identities: [String: String] = [:]
+        for workspace in workspaces {
+            if let alias = workspace.deviceAlias, let identity = workspace.deviceID {
+                identities[alias] = identity
+            }
+        }
+        for device in knownDevices {
+            if let alias = device.alias, let identity = device.deviceID {
+                identities[alias] = identity
+            }
+        }
+        let localIdentity = workspaces.first { $0.deviceAlias == nil && $0.deviceID != nil }?.deviceID
+            ?? knownDevices.first { $0.isLocal }?.deviceID
+        var groups: [SidebarMachineGroup] = []
+        for workspace in workspaces {
+            let alias = workspace.deviceAlias
+            let identity = alias.flatMap { identities[$0] }
+            let isLocal = alias == nil || (identity != nil && identity == localIdentity)
+            let key = isLocal ? "local" : identity.map { "device:\($0)" } ?? "alias:\(alias ?? "")"
+            if let index = groups.firstIndex(where: { $0.id == key }) {
+                groups[index].workspaces.append(workspace)
+            } else {
+                groups.append(SidebarMachineGroup(
+                    id: key, device: isLocal ? .thisMac : KnownDevice(alias: alias, deviceID: identity),
+                    name: isLocal ? localMachineName : alias ?? localMachineName,
+                    workspaces: [workspace]))
+            }
+        }
+        for index in groups.indices {
+            // Keep the name already shown in the switcher when a machine has
+            // one workspace. Multiple scopes use the machine's own name.
+            if groups[index].workspaces.count == 1, let name = groups[index].workspaces.first?.name,
+               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               name != Workspace.defaultName, name != localized("This Mac"), name != "This Machine" {
+                groups[index].name = name
+            }
+        }
+        return groups.sorted {
+            if $0.device.isLocal != $1.device.isLocal { return $0.device.isLocal }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+}
+
 /// One block of the Session menu's roster: the rows under a single header.
 struct SessionGroup {
     /// Which tier of the sidebar this block comes from. The menu draws a divider
@@ -23,6 +78,11 @@ struct SessionGroup {
 /// cycling verbs. Both read the same flattened order, so the menu's list and
 /// what "next" means always agree.
 extension TermioStore {
+    var sidebarMachineGroups: [SidebarMachineGroup] {
+        SidebarMachineGroup.groups(workspaces: orderedWorkspaces, knownDevices: DeviceRoster.known(in: self))
+    }
+
+
     /// Every session in the app, grouped the way the sidebar groups it: for each
     /// workspace, its Terminals, then its Chats, then its projects in sidebar
     /// order; within a project the primary checkout's sessions precede each

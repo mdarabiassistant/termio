@@ -134,6 +134,87 @@ private struct SidebarSectionHeader: View {
 struct SidebarView: View {
     @EnvironmentObject var store: TermioStore
     @EnvironmentObject var settings: AppSettings
+    @State private var collapsedMachines: Set<String> = []
+
+    var body: some View {
+        let machines = store.sidebarMachineGroups
+        // Keep selection on the session rows: native List selection and onDrag
+        // compete for mouseDown and delay terminal focus.
+        List {
+            if !settings.agentHooksEnabled && store.isRunningAnyAgent {
+                AgentHooksOffBanner { settings.agentHooksEnabled = true }
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
+            ForEach(machines) { machine in
+                machineHeader(machine)
+                if !collapsedMachines.contains(machine.id) {
+                    ForEach(machine.workspaces) { workspace in
+                        if machine.workspaces.count > 1 {
+                            Text(workspace.name)
+                                .font(settings.interfaceFont)
+                                .fontWeight(.medium)
+                                .padding(.leading, 16 - sidebarLeadingTrim)
+                        }
+                        WorkspaceSidebarRows(workspace: workspace)
+                            .padding(.leading, 16)
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .contentMargins(.bottom, 12, for: .scrollContent)
+        .environment(\.defaultMinListRowHeight, 1)
+        .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+        .onChange(of: store.selectedSessionID) { _, selected in
+            guard let selected,
+                  let workspace = store.workspace(for: selected),
+                  let machine = machines.first(where: { $0.workspaces.contains { $0.id == workspace.id } })
+            else { return }
+            collapsedMachines.remove(machine.id)
+        }
+    }
+
+    private func machineHeader(_ machine: SidebarMachineGroup) -> some View {
+        let collapsed = collapsedMachines.contains(machine.id)
+        return HStack(spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if collapsed { collapsedMachines.remove(machine.id) }
+                    else { collapsedMachines.insert(machine.id) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 10)
+                        .foregroundStyle(.secondary)
+                    Text(machine.name)
+                        .font(settings.interfaceFont)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(machine.name)
+            .accessibilityValue(collapsed ? localized("Collapsed") : localized("Expanded"))
+        }
+        .padding(.leading, -sidebarLeadingTrim)
+        .padding(.top, machine.device.isLocal ? 0 : 12)
+        .padding(.bottom, 4)
+        .background(OutlineViewFixups())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct WorkspaceSidebarRows: View {
+    let workspace: Workspace
+    @EnvironmentObject var store: TermioStore
+    @EnvironmentObject var settings: AppSettings
     // The terminal theme is split light/dark and libghostty tracks the system
     // appearance; the chrome borrows whichever side is currently showing.
     @Environment(\.colorScheme) private var colorScheme
@@ -152,29 +233,7 @@ struct SidebarView: View {
     private var chrome: ChromeTheme? { settings.chromeTheme(for: colorScheme) }
 
     var body: some View {
-        // Selection is driven by a *simultaneous* tap on each session row (see
-        // `SessionRow`), never by List's `selection:` binding: with `.onDrag` mounted
-        // on the rows, NSTableView's native click-to-select doesn't commit until
-        // seconds later (the drag machinery swallows the mouseDown) — that shipped as
-        // v0.19.0's dead sidebar clicks. The store stays the single source of
-        // selection truth and `SidebarRowHighlight` its only visual cue.
-        // A flat list rather than `Section`s: the sidebar's section spacing leaves
-        // a big empty band between a collapsed project's header and the next, and
-        // macOS has no `listSectionSpacing`. So the pinned grouping is hand-rolled
-        // too — our own quiet "Pinned" label + a hairline — keeping folded rows tight.
-        //
-        // Row order: the "Pinned" working set first (above everything — the curated,
-        // deliberately-elevated items); then the loose Terminals and Chats sections; then
-        // the rest. A project's membership in the pinned group is itself the pin cue, so
-        // pinned rows carry no per-row badge. Both groups keep the user's chosen sort
-        // (already applied by `orderedProjects`, which we only partition here — never reorder).
-        //
-        // The sidebar shows one WORKSPACE, and `store.currentWorkspace` says which.
-        // A workspace spans machines: a project row's session that runs on a VPS
-        // draws here, beside its siblings, wearing that machine's mark — the device
-        // is a property of the row now, not a filter over the column.
-        let workspace = store.currentWorkspace
-        let ordered = store.orderedProjects
+        let ordered = store.projects(inWorkspace: workspace.id)
         let pinnedProjects = ordered.filter(\.pinned)
         let others = ordered.filter { !$0.pinned }
         // Pinned worktrees are gathered only from *unpinned* projects: a pinned project
@@ -216,14 +275,7 @@ struct SidebarView: View {
             || !pinnedSessions.isEmpty || !waitingElsewhere.isEmpty
         let hasTerminals = !workspace.terminals.isEmpty
         let hasChats = !workspace.chats.isEmpty
-        return List {
-            // Nudge when agents are running but the status hooks are off — without them
-            // the sidebar spinner stays dark. One tap enables (and reinstalls) them.
-            if !settings.agentHooksEnabled && store.isRunningAnyAgent {
-                AgentHooksOffBanner { settings.agentHooksEnabled = true }
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-            }
+        return Group {
             // The top "Pinned" working set, under its own section header: pinned projects
             // as full blocks, then pinned worktrees as mini-blocks (header + their
             // sessions), then pinned sessions as shortcut rows — each nested entry tagged
@@ -339,13 +391,6 @@ struct SidebarView: View {
             // no second list to learn. The "Also Running" section that used to
             // sit here is gone with #528.
         }
-        // The native macOS `.sidebar` source list — its own Liquid Glass material, full-height
-        // behind the traffic lights. (We previously painted the column ourselves to dodge a macOS 26
-        // full-screen round-trip bug, but per the design call we're back to the stock sidebar.)
-        .listStyle(.sidebar)
-        .contentMargins(.bottom, 12, for: .scrollContent)
-        .environment(\.defaultMinListRowHeight, 1)
-        .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
     }
 
     /// Agents blocked on the user outside the workspace on screen. Sorted by the
@@ -391,7 +436,7 @@ struct SidebarView: View {
                 )
                 if !collapsedWorktrees.contains(worktree.id) {
                     let sessions = project.sessions.filter {
-                        $0.worktreePath == worktree.path && store.isOnCurrentDevice($0)
+                        $0.worktreePath == worktree.path
                     }
                     let splitMarks = splitLinkMarks(for: sessions)
                     ForEach(sessions) { session in
