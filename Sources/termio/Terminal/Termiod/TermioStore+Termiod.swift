@@ -676,17 +676,34 @@ extension TermioStore {
     /// back includes sessions this app never opened, which is the difference
     /// between reading a device's state and filtering your own.
     ///
-    /// Runs off the main thread (an SSH round trip is 216–292 ms cold) and drops
-    /// its reply if the user has moved on to another device meanwhile.
+    /// Runs off the main thread. Replies for other devices update their rows
+    /// without replacing the current device's published roster.
     /// How long one device's answer stands in for the next ask. Long enough to
     /// absorb the several asks a single gesture makes, short enough that a user
     /// who switches deliberately gets a fresh list.
     private static let rosterCoalescingWindow = Duration.milliseconds(500)
 
-    func refreshDeviceSessions() {
+    func refreshKnownDeviceSessions(
+        fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
+            try Termiod.roster(route: $0)
+        }
+    ) {
+        let current = currentDevice
+        refreshDeviceSessions(on: current, fetchingRoster: fetchingRoster)
+        for device in DeviceRoster.known(in: self) where device.route != current.route {
+            refreshDeviceSessions(on: device, fetchingRoster: fetchingRoster)
+        }
+    }
+
+    func refreshDeviceSessions(
+        on device: KnownDevice? = nil,
+        fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
+            try Termiod.roster(route: $0)
+        }
+    ) {
         let span = Trace.device.begin("roster request")
         defer { Trace.device.end(span) }
-        let device = currentDevice
+        let device = device ?? currentDevice
         let route = device.route
         let key = route.description
 
@@ -694,8 +711,7 @@ extension TermioStore {
         // the selection follows the session onto its machine, and then the switch
         // enters the machine's own fallback workspace. Both are right, and
         // neither can see the other, so the second ask is dropped here — the one
-        // already in flight is for this same route and its reply is still
-        // wanted, which is why the generation is deliberately not bumped.
+        // already in flight is for this same route and its reply is still wanted.
         //
         // A reply that landed a moment ago counts too, but only while the
         // published answer is still that route's: after switching away and back
@@ -711,17 +727,14 @@ extension TermioStore {
             return
         }
 
-        let persistedNames = Set(projects.flatMap { project in
-            project.sessions.map(daemonSessionName(for:))
-        })
-        deviceSessionsGeneration += 1
-        let generation = deviceSessionsGeneration
+        let persistedNames = Set(sessions(authoredFor: device).map(daemonSessionName(for:)))
         rosterFetches[key, default: RosterFetch()].inFlight = true
         // Only when there is nothing of this machine's to show. A switch back to
         // a device whose roster is already on screen keeps it there for the
         // length of the round trip rather than blanking the column to a spinner
         // and filling it back in with the same rows.
-        if deviceSessionsRoute != key || deviceSessions.sessions == nil {
+        if currentDevice.route == route,
+           deviceSessionsRoute != key || deviceSessions.sessions == nil {
             deviceSessions = .loading
         }
         let requested = ContinuousClock.now
@@ -730,7 +743,7 @@ extension TermioStore {
                 "roster fetch", "route=\(route.description)"
             ) {
                 do {
-                    return .success(try Termiod.roster(route: route))
+                    return .success(try fetchingRoster(route))
                 } catch {
                     return .failure(error)
                 }
@@ -742,18 +755,6 @@ extension TermioStore {
                     // the cached answer this route is about to be compared with.
                     self.rosterFetches[key, default: RosterFetch()].inFlight = false
                     self.rosterFetches[key, default: RosterFetch()].settledAt = .now
-                    // The counter drops a reply from a device the user has left.
-                    // The route is the second half of that question and the one
-                    // that survives coalescing: an ask that stood down behind
-                    // this request bumped no counter, so the counter can name a
-                    // later request while this reply is still the right answer
-                    // for the machine on screen. Only one request per route is
-                    // ever out, so there is no older reply to overtake a newer.
-                    guard self.deviceSessionsGeneration == generation
-                        || self.currentDevice.route.description == key else {
-                        Trace.device.report("roster dropped", "route=\(key)", since: requested)
-                        return
-                    }
                     Trace.device.report("roster round trip", "route=\(key)", since: requested)
                     self.applyRoster(outcome, from: device, route: route,
                                      persisted: persistedNames)
@@ -771,12 +772,14 @@ extension TermioStore {
         let span = Trace.device.begin("roster apply")
         defer { Trace.device.end(span) }
         let key = route.description
+        let isCurrentDevice = currentDevice.route == route
         switch outcome {
         case .failure(let error):
             let message = error.localizedDescription
             // A daemon this app asked to stop is between builds, not gone. The
             // column keeps its spinner; the loop refreshes it when it is done.
             if upgradingRoutes.contains(key) {
+                guard isCurrentDevice else { return }
                 deviceSessions = .loading
                 deviceSessionsRoute = key
                 return
@@ -785,6 +788,10 @@ extension TermioStore {
             // cannot stand in for the next reply: a machine that comes back must
             // repaint even if it comes back holding exactly what it held before.
             rosterFetches[key]?.answer = nil
+            guard isCurrentDevice else {
+                Log.termiod.error("roster of \(key, privacy: .public) failed: \(message, privacy: .public)")
+                return
+            }
             // An unreachable machine fails the same way every time it is asked.
             // Saying so once is the report; saying so on every switch is noise
             // in the log and a sidebar rebuild for news that hasn't changed.
@@ -816,7 +823,8 @@ extension TermioStore {
             // rebuilds on every publish, and a device that answers what it
             // answered last time — a switch back into a machine nothing has
             // happened on — should cost nothing.
-            if deviceSessionsRoute != key || deviceSessions.sessions != answer {
+            if isCurrentDevice,
+               deviceSessionsRoute != key || deviceSessions.sessions != answer {
                 deviceSessions = .ready(answer)
                 deviceSessionsRoute = key
             }
@@ -912,7 +920,7 @@ extension TermioStore {
     ///
     /// Filed in the project whose checkout on this device contains its cwd, else
     /// as a loose terminal — the machine's fallback workspace for another
-    /// device, the current workspace's Terminals for this Mac. The selection is
+    /// device, a local workspace's Terminals for this Mac. The selection is
     /// deliberately not moved: nobody clicked anything.
     func adoptDeviceSession(_ information: Termiod.SessionInformation, on device: KnownDevice) {
         var session = Session(title: information.displayLabel, agent: .terminal)
@@ -926,8 +934,11 @@ extension TermioStore {
             projects[projectIndex].sessions.append(session)
             return
         }
+        if device.isLocal, !workspaces.contains(where: { $0.device.isThisMac }) {
+            workspaces.append(Workspace(name: Workspace.defaultName))
+        }
         let workspaceID = device.alias.map { deviceWorkspace(for: $0, deviceID: device.deviceID) }
-            ?? currentWorkspace.id
+            ?? workspaceForThisMac.id
         guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else {
             Log.termiod.error("""
             adopting \(information.name, privacy: .public) found no workspace to file it under

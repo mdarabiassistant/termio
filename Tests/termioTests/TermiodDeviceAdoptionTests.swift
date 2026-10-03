@@ -1,3 +1,4 @@
+import TermioShared
 import XCTest
 @testable import termio
 
@@ -309,5 +310,247 @@ final class TermiodDeviceAdoptionTests: XCTestCase {
         XCTAssertNil(decoded.deviceID)
         XCTAssertEqual(decoded.sshHost, "vps")
         XCTAssertEqual(decoded.remoteCheckouts, ["vps": "/home/me/termio"])
+    }
+}
+
+@MainActor
+final class RemoteSessionDiscoveryTests: XCTestCase {
+    private func makeStore(workspaces: [Workspace]) -> TermioStore {
+        let defaults = UserDefaults(suiteName: "discovery-\(UUID().uuidString)") ?? .standard
+        return TermioStore(workspaces: workspaces, settings: AppSettings(defaults: defaults))
+    }
+
+    private func payload(name: String? = nil, attached: Int = 0) throws -> Termiod.SessionsPayload {
+        let sessions: [[String: Any]] = name.map {
+            [["id": "\($0)-daemon", "name": $0, "pid": 42, "alive": true,
+              "cwd": "/srv/work", "attachedClients": attached]]
+        } ?? []
+        return try JSONDecoder().decode(
+            Termiod.SessionsPayload.self,
+            from: JSONSerialization.data(withJSONObject: ["sessions": sessions]))
+    }
+
+    private func waitForRoster(_ route: TermiodRoute, in store: TermioStore) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while true {
+            if let fetch = store.rosterFetches[route.description],
+               !fetch.inFlight, fetch.settledAt != nil { return }
+            guard ContinuousClock.now < deadline else {
+                XCTFail("The roster request for \(route) did not finish")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testKnownDevicesIncludeEmptyRemoteWorkspacesAndLooseSessions() {
+        let workspaceAlias = "workspace-\(UUID().uuidString)"
+        let sessionAlias = "session-\(UUID().uuidString)"
+        var session = Session(title: "Remote shell", agent: .terminal)
+        session.termiodRemoteHost = sessionAlias
+        session.deviceID = "h_session"
+        let store = makeStore(workspaces: [
+            Workspace(name: "Local", terminals: [session]),
+            Workspace(name: "Remote", deviceAlias: workspaceAlias, deviceID: "h_workspace"),
+        ])
+
+        let known = DeviceRoster.known(in: store)
+        XCTAssertEqual(known.first, .thisMac)
+        XCTAssertEqual(known.first { $0.alias == workspaceAlias }?.deviceID, "h_workspace")
+        XCTAssertEqual(known.first { $0.alias == sessionAlias }?.deviceID, "h_session")
+        XCTAssertEqual(known.filter { $0.alias == sessionAlias }.count, 1)
+    }
+
+    func testStartupDiscoversAttachedRemoteSessionsWithoutMovingTheLocalSelection() async throws {
+        let alias = "discovery-\(UUID().uuidString)"
+        let localSession = Session(title: "Local shell", agent: .terminal)
+        let local = Workspace(name: "Local", terminals: [localSession])
+        let remote = Workspace(name: "Remote", deviceAlias: alias)
+        let store = makeStore(workspaces: [local, remote])
+        let remotePayload = try payload(name: "already-running", attached: 2)
+        let empty = try payload()
+        let loader: @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = { route in
+            route == .ssh(alias) ? remotePayload : empty
+        }
+
+        store.refreshKnownDeviceSessions(fetchingRoster: loader)
+        try await waitForRoster(.local, in: store)
+        try await waitForRoster(.ssh(alias), in: store)
+
+        let adopted = store.sessions(inWorkspace: remote.id).first
+        XCTAssertEqual(adopted?.termiodSessionName, "already-running")
+        XCTAssertEqual(adopted?.termiodDaemonID, "already-running-daemon")
+        XCTAssertEqual(adopted?.termiodRemoteHost, alias)
+        XCTAssertEqual(adopted?.termiodRemoteCwd, "/srv/work")
+        XCTAssertEqual(store.selectedSessionID, localSession.id)
+        XCTAssertEqual(store.currentWorkspaceID, local.id)
+        XCTAssertNil(store.currentDeviceAlias)
+        XCTAssertEqual(store.deviceSessionsRoute, TermiodRoute.local.description)
+        XCTAssertEqual(store.deviceSessions.sessions?.live.count, 0)
+
+        store.refreshKnownDeviceSessions(fetchingRoster: loader)
+        try await waitForRoster(.ssh(alias), in: store)
+        XCTAssertEqual(store.sessions(inWorkspace: remote.id).map(\.id), [adopted?.id].compactMap { $0 })
+    }
+
+    func testAnUnreachableRemotePreservesLocalRosterAndCanBeRetried() async throws {
+        let alias = "offline-\(UUID().uuidString)"
+        var remoteSession = Session(title: "Remote shell", agent: .terminal)
+        remoteSession.termiodRemoteHost = alias
+        let store = makeStore(workspaces: [
+            Workspace(name: "Local"),
+            Workspace(name: "Remote", terminals: [remoteSession], deviceAlias: alias),
+        ])
+        let empty = try payload()
+        store.refreshKnownDeviceSessions { route in
+            if route == .ssh(alias) { throw URLError(.cannotConnectToHost) }
+            return empty
+        }
+        try await waitForRoster(.local, in: store)
+        try await waitForRoster(.ssh(alias), in: store)
+
+        XCTAssertEqual(store.deviceSessionsRoute, TermiodRoute.local.description)
+        XCTAssertNotNil(store.deviceSessions.sessions)
+        XCTAssertNotNil(store.session(remoteSession.id))
+
+        let live = try payload(name: "back-online")
+        store.refreshDeviceSessions(on: KnownDevice(alias: alias, deviceID: nil)) { _ in live }
+        try await waitForRoster(.ssh(alias), in: store)
+        XCTAssertTrue(store.allSessions.contains { $0.termiodSessionName == "back-online" })
+        XCTAssertEqual(store.deviceSessionsRoute, TermiodRoute.local.description)
+    }
+
+    func testAReplyAfterSwitchingDevicesStillAdoptsWithoutReplacingTheDisplayedRoster() async throws {
+        let alias = "slow-\(UUID().uuidString)"
+        let otherAlias = "other-\(UUID().uuidString)"
+        let store = makeStore(workspaces: [Workspace(name: "Local")])
+        let live = try payload(name: "slow-session")
+        let release = DispatchSemaphore(value: 0)
+        let started = expectation(description: "The remote request started")
+        store.refreshDeviceSessions(on: KnownDevice(alias: alias, deviceID: nil)) { _ in
+            started.fulfill()
+            guard release.wait(timeout: .now() + 3) == .success else {
+                throw URLError(.timedOut)
+            }
+            return live
+        }
+        await fulfillment(of: [started], timeout: 3)
+        store.currentDeviceAlias = otherAlias
+        store.deviceSessionsRoute = TermiodRoute.ssh(otherAlias).description
+        store.deviceSessions = .ready(DeviceSessions(live: [], tombstones: []))
+        release.signal()
+        try await waitForRoster(.ssh(alias), in: store)
+
+        XCTAssertEqual(store.allSessions.first?.termiodRemoteHost, alias)
+        XCTAssertEqual(store.currentDeviceAlias, otherAlias)
+        XCTAssertEqual(store.deviceSessionsRoute, TermiodRoute.ssh(otherAlias).description)
+        XCTAssertEqual(store.deviceSessions.sessions?.live.count, 0)
+        XCTAssertNil(store.selectedSessionID)
+    }
+
+    func testLocalDiscoveryWhileViewingARemoteWorkspaceFilesSessionsLocally() async throws {
+        let local = Workspace(name: "Local")
+        let remote = Workspace(name: "Remote", deviceAlias: "viewing-\(UUID().uuidString)")
+        let store = makeStore(workspaces: [local, remote])
+        store.currentWorkspaceID = remote.id
+        store.currentDeviceAlias = remote.deviceAlias
+        let live = try payload(name: "local-session")
+
+        store.refreshDeviceSessions(on: .thisMac) { _ in live }
+        try await waitForRoster(.local, in: store)
+
+        XCTAssertEqual(store.sessions(inWorkspace: local.id).first?.termiodSessionName, "local-session")
+        XCTAssertTrue(store.sessions(inWorkspace: remote.id).isEmpty)
+        XCTAssertEqual(store.currentWorkspaceID, remote.id)
+        XCTAssertNil(store.deviceSessionsRoute)
+    }
+}
+
+@MainActor
+final class RemoteDiscoveryIdentityTests: XCTestCase {
+    private func makeStore(workspaces: [Workspace]) -> TermioStore {
+        let defaults = UserDefaults(suiteName: "discovery-identity-\(UUID().uuidString)") ?? .standard
+        return TermioStore(workspaces: workspaces, settings: AppSettings(defaults: defaults))
+    }
+
+    private func payload() throws -> Termiod.SessionsPayload {
+        try JSONDecoder().decode(Termiod.SessionsPayload.self, from: Data("""
+        {"sessions":[{"id":"existing-daemon","name":"existing-shell","pid":42,
+          "alive":true,"cwd":"/srv/work","attachedClients":2}]}
+        """.utf8))
+    }
+
+    private func waitForRoster(_ route: TermiodRoute, in store: TermioStore) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while store.rosterFetches[route.description]?.inFlight != false {
+            guard ContinuousClock.now < deadline else {
+                XCTFail("The roster request did not finish")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testConcurrentAliasesKeepTheExistingRowBeforeItsRouteReplies() async throws {
+        let firstAlias = "first-\(UUID().uuidString)"
+        let secondAlias = "second-\(UUID().uuidString)"
+        let identity = "h_\(UUID().uuidString)"
+        for alias in [firstAlias, secondAlias] {
+            TermiodDeviceRegistry.shared.record(
+                hostID: identity, daemonVersion: "test", route: .ssh(alias))
+        }
+        var existing = Session(title: "Existing shell", agent: .terminal)
+        existing.termiodRemoteHost = secondAlias
+        existing.termiodSessionName = "existing-shell"
+        let remote = Workspace(name: "Remote", terminals: [existing], deviceAlias: secondAlias)
+        let store = makeStore(workspaces: [Workspace(name: "Local"), remote])
+        let live = try payload()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        store.refreshDeviceSessions(on: KnownDevice(alias: secondAlias, deviceID: identity)) { _ in
+            guard release.wait(timeout: .now() + 5) == .success else { throw URLError(.timedOut) }
+            return live
+        }
+        store.refreshDeviceSessions(on: KnownDevice(alias: firstAlias, deviceID: identity)) { _ in live }
+        try await waitForRoster(.ssh(firstAlias), in: store)
+        XCTAssertEqual(store.allSessions.map(\.id), [existing.id])
+        XCTAssertEqual(store.sessions(inWorkspace: remote.id).first?.termiodDaemonID, "existing-daemon")
+        release.signal()
+        try await waitForRoster(.ssh(secondAlias), in: store)
+        XCTAssertEqual(store.allSessions.map(\.id), [existing.id])
+    }
+
+    func testDifferentMachinesCanDiscoverTheSameSessionName() async throws {
+        let first = Workspace(name: "First", deviceAlias: "first-\(UUID().uuidString)", deviceID: "h_first")
+        let second = Workspace(name: "Second", deviceAlias: "second-\(UUID().uuidString)", deviceID: "h_second")
+        let store = makeStore(workspaces: [Workspace(name: "Local"), first, second])
+        let live = try payload()
+        store.refreshDeviceSessions(on: KnownDevice(alias: first.deviceAlias, deviceID: first.deviceID)) { _ in live }
+        store.refreshDeviceSessions(on: KnownDevice(alias: second.deviceAlias, deviceID: second.deviceID)) { _ in live }
+        try await waitForRoster(TermiodRoute(sshAlias: first.deviceAlias), in: store)
+        try await waitForRoster(TermiodRoute(sshAlias: second.deviceAlias), in: store)
+        XCTAssertEqual(store.sessions(inWorkspace: first.id).first?.termiodRemoteHost, first.deviceAlias)
+        XCTAssertEqual(store.sessions(inWorkspace: second.id).first?.termiodRemoteHost, second.deviceAlias)
+        XCTAssertEqual(store.allSessions.count, 2)
+    }
+
+    func testLocalDiscoveryCreatesALocalWorkspaceWhenOnlyRemoteWorkspacesExist() async throws {
+        let remote = Workspace(name: "Remote", deviceAlias: "remote-\(UUID().uuidString)")
+        let store = makeStore(workspaces: [remote])
+        store.currentDeviceAlias = remote.deviceAlias
+        let live = try payload()
+        store.refreshDeviceSessions(on: .thisMac) { _ in live }
+        try await waitForRoster(.local, in: store)
+        // An attached local session belongs to another local client.
+        XCTAssertTrue(store.allSessions.isEmpty)
+        let detached = try JSONDecoder().decode(Termiod.SessionsPayload.self, from: Data("""
+        {"sessions":[{"id":"local-daemon","name":"local-shell","pid":43,
+          "alive":true,"cwd":"/srv/work","attachedClients":0}]}
+        """.utf8))
+        store.refreshDeviceSessions(on: .thisMac) { _ in detached }
+        try await waitForRoster(.local, in: store)
+        XCTAssertEqual(store.workspaces.first { $0.device.isThisMac }?.terminals.first?.termiodSessionName, "local-shell")
+        XCTAssertTrue(store.sessions(inWorkspace: remote.id).isEmpty)
+        XCTAssertEqual(store.currentWorkspaceID, remote.id)
     }
 }

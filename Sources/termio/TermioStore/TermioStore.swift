@@ -1038,12 +1038,6 @@ final class TermioStore: ObservableObject {
     /// backend off.
     @Published var deviceSessions: DeviceSessionsState = .unavailable
 
-    /// Guards against a slow reply from a device the user has already left: every
-    /// request stamps this counter and a reply that no longer matches is dropped.
-    /// Without it, switching away during an SSH round trip repaints the sidebar
-    /// with the previous machine's sessions.
-    var deviceSessionsGeneration = 0
-
     /// Which route the published `deviceSessions` describes. A roster is only
     /// reusable for the machine it came from, so every decision to skip a fetch
     /// or a publish has to check this first — without it, coalescing two

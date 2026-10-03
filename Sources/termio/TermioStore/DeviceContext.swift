@@ -236,7 +236,11 @@ extension TermioStore {
         // Matched by device identity once both ends know it, so a box reached by
         // a second alias is still the same machine — and by alias until the first
         // handshake resolves one, the bootstrap/stable split `KnownDevice` carries.
-        if alias != nil, let deviceID = device.deviceID, let sessionDevice = session.deviceID {
+        // Startup asks every known route concurrently. An older row may still
+        // lack an identity when another alias for its machine answers first.
+        if let alias, let deviceID = device.deviceID,
+           let sessionDevice = session.deviceID
+            ?? TermiodDeviceRegistry.shared.deviceID(for: .ssh(alias)) {
             return deviceID == sessionDevice
         }
         return alias == device.alias
