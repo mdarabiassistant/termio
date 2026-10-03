@@ -17,6 +17,23 @@ export type ChangelogEntry = {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "0.55.4",
+    date: "2026-10-03",
+    title: "All your machines in one sidebar",
+    changes: {
+      new: [
+        "Local and remote machines appear together under collapsible sidebar headings, with their existing Terminals, Chats, Pinned, and Projects sections.",
+      ],
+      improved: [
+        "Custom session names are shared with other clients connected to the same session host and survive reconnects.",
+      ],
+      fixed: [
+        "Remote Hosts settings no longer list the same machine more than once when several SSH aliases reach it.",
+        "Remote sessions connect correctly when a long temporary SSH socket path would otherwise leave them reconnecting.",
+      ],
+    },
+  },
+  {
     version: "0.55.2",
     date: "2026-10-02",
     title: "Find existing remote sessions at launch",
