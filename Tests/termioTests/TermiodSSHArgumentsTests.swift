@@ -95,4 +95,35 @@ final class TermiodSSHArgumentsTests: XCTestCase {
             "-o", "ConnectTimeout=\(Termiod.connectTimeoutSeconds)",
         ])
     }
+
+    func testLongPreviewControlPathCostsOnlyMultiplexing() {
+        let path = "/var/folders/aa/" + String(repeating: "b", count: 26)
+            + "/T/termio-ssh-sidebar-preview/2f1c8a90b3d4e5f6"
+        let arguments = Termiod.sshArguments(
+            options: Termiod.EffectiveSSHOptions(dump: defaultsDump), controlPath: path)
+        XCTAssertEqual(arguments, [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=\(Termiod.connectTimeoutSeconds)",
+        ])
+    }
+
+    func testControlPathReservesSpaceForOpenSSHTemporarySuffixAndTerminator() {
+        for (length, usesMultiplexing) in [(86, true), (87, false)] {
+            let path = "/" + String(repeating: "a", count: length - 1)
+            let arguments = Termiod.sshArguments(
+                options: Termiod.EffectiveSSHOptions(dump: defaultsDump), controlPath: path)
+            XCTAssertEqual(arguments.contains("ControlMaster=auto"), usesMultiplexing,
+                           "ControlPath is \(length) bytes before OpenSSH adds its temporary suffix")
+        }
+    }
+
+    func testControlPathLimitCountsUTF8Bytes() {
+        let path = "/" + String(repeating: "é", count: 43)
+        let arguments = Termiod.sshArguments(
+            options: Termiod.EffectiveSSHOptions(dump: defaultsDump), controlPath: path)
+        XCTAssertEqual(arguments, [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=\(Termiod.connectTimeoutSeconds)",
+        ])
+    }
 }
