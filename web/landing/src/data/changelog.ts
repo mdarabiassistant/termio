@@ -17,6 +17,17 @@ export type ChangelogEntry = {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "0.55.2",
+    date: "2026-10-02",
+    title: "Find existing remote sessions at launch",
+    changes: {
+      fixed: [
+        "Termio discovers sessions already running on previously connected remote machines at launch, including sessions attached to another client.",
+        "Background discovery keeps the current workspace and selection in place, and multiple connections to the same machine no longer create duplicate session rows.",
+      ],
+    },
+  },
+  {
     version: "0.55.1",
     date: "2026-10-02",
     title: "Remote SSH sessions survive disconnects",
