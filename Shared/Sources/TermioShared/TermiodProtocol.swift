@@ -358,10 +358,12 @@ public enum Termiod {
         public let env: [[String]]
         public let rows: UInt16
         public let cols: UInt16
+        public let customName: String?
         public let workstream: WorkstreamSpecification?
 
         public init(cwd: String, argv: [String], env: [[String]], rows: UInt16, cols: UInt16,
-                    command: String? = nil, workstream: WorkstreamSpecification? = nil) {
+                    command: String? = nil, workstream: WorkstreamSpecification? = nil,
+                    customName: String? = nil) {
             self.cwd = cwd
             self.argv = argv
             self.command = command
@@ -369,6 +371,7 @@ public enum Termiod {
             self.rows = rows
             self.cols = cols
             self.workstream = workstream
+            self.customName = customName
         }
     }
 
@@ -399,6 +402,18 @@ public enum Termiod {
     private struct ListOperation: Encodable {
         let op = "list"
         let seq: UInt64
+    }
+
+    private struct SetNameOperation: Encodable {
+        let op = "set_name"
+        let id: String
+        let customName: String?
+        let ifUnset: Bool
+        let seq: UInt64
+    }
+
+    public struct NameSetPayload: Decodable, Sendable {
+        public let session: SessionInformation
     }
 
     private struct KillOperation: Encodable {
@@ -985,6 +1000,9 @@ public enum Termiod {
         public let project: String?
         /// The title the agent reported, when it reported one.
         public let title: String?
+        public let customName: String?
+        /// Absent on older daemons; zero means no user has named this session yet.
+        public let customNameRevision: UInt64?
         public let createdUnix: UInt64
         /// How many clients are attached right now. A non-zero count on a session
         /// this app has no row for means someone else is watching it.
@@ -1026,6 +1044,7 @@ public enum Termiod {
 
         private enum CodingKeys: String, CodingKey {
             case id, name, pid, alive, cwd, command, status, project, title, createdUnix
+            case customName, customNameRevision
             case agentID = "agentId"
             case attachedClients
             case foregroundPid, foregroundArgv, foregroundJob
@@ -1044,6 +1063,8 @@ public enum Termiod {
             agentID = try container.decodeIfPresent(String.self, forKey: .agentID)
             project = try container.decodeIfPresent(String.self, forKey: .project)
             title = try container.decodeIfPresent(String.self, forKey: .title)
+            customName = try container.decodeIfPresent(String.self, forKey: .customName)
+            customNameRevision = try container.decodeIfPresent(UInt64.self, forKey: .customNameRevision)
             createdUnix = try container.decodeIfPresent(UInt64.self, forKey: .createdUnix) ?? 0
             attachedClients = try container.decodeIfPresent(Int.self, forKey: .attachedClients) ?? 0
             // Every one of these stays optional rather than defaulting: a default
@@ -1059,27 +1080,17 @@ public enum Termiod {
                 Bool.self, forKey: .childExecutableReplaced)
         }
 
-        /// What to call this session on screen. The name is the daemon's handle,
-        /// not a label: a session Termio created is named with the app's session
-        /// uuid, so a roster row for one this app has no record of would read as
-        /// a line of hex. In order of how much it tells a person: the reported
-        /// title, the agent, the program actually running, and — only when the
-        /// command says nothing — the name itself.
-        /// The rungs of `displayLabel` that are a *name* rather than a guess at one:
-        /// a title typed on the box, the daemon's own session name, the program the
-        /// session is running. A viewer keeps these — they are the only thing naming
-        /// the row over there.
-        ///
-        /// `nil` when the label is only the agent's id, which the client's own
-        /// promotion improves on: that row becomes `Claude Code`, and then whatever
-        /// the agent's live title says it is working on.
+        /// A user's explicit label on current daemons. Older daemons only
+        /// provide inferred labels, which keep their legacy fallback behavior.
         public var givenName: String? {
+            if customNameRevision != nil { return customName }
             if let title, !title.isEmpty { return title }
             if let agentID, !agentID.isEmpty { return nil }
             return displayLabel
         }
 
         public var displayLabel: String {
+            if let customName, !customName.isEmpty { return customName }
             if let title, !title.isEmpty { return title }
             if let agentID, !agentID.isEmpty { return agentID }
             // What the device's kernel says is actually running, before the
@@ -1568,6 +1579,7 @@ public enum Termiod {
         case attached(AttachedPayload)
         case exited(ExitedPayload)
         case sessions(SessionsPayload)
+        case nameSet(NameSetPayload)
         case uploadOpened(UploadOpenedPayload)
         case uploadAck(UploadAckPayload)
         case uploadCommitted(UploadCommittedPayload)
@@ -1617,6 +1629,8 @@ public enum Termiod {
             return .attached(try decoder.decode(AttachedPayload.self, from: payload))
         case "exited":
             return .exited(try decoder.decode(ExitedPayload.self, from: payload))
+        case "name_set":
+            return .nameSet(try decoder.decode(NameSetPayload.self, from: payload))
         case "sessions":
             return .sessions(try decoder.decode(SessionsPayload.self, from: payload))
         case "upload_opened":
@@ -1778,6 +1792,12 @@ public enum Termiod {
             rendering: rendering ? nil : false,
             seq: 1
         ))
+    }
+
+    public static func setNamePayload(
+        target: String, name: String?, ifUnset: Bool = false, seq: UInt64 = 1
+    ) throws -> Data {
+        try encodeControl(SetNameOperation(id: target, customName: name, ifUnset: ifUnset, seq: seq))
     }
 
     public static func listPayload(seq: UInt64 = 1) throws -> Data {

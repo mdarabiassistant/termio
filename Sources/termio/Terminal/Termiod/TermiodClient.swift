@@ -1072,6 +1072,26 @@ extension Termiod {
         }
     }
 
+    /// Returns nil for an older daemon, leaving the local rename queued until upgrade.
+    static func setSessionName(
+        target: String, name: String?, ifUnset: Bool, route: TermiodRoute = .local
+    ) throws -> SessionInformation? {
+        try withControlChannel(route: route, caps: ["session_names"]) { transport, handshake in
+            guard handshake.capabilities.contains("session_names") else { return nil }
+            try writeFrame(transport.writeDescriptor, kind: .control,
+                           payload: setNamePayload(target: target, name: name, ifUnset: ifUnset))
+            while true {
+                let frame = try readFrame(transport.readDescriptor)
+                guard frame.kind == .control else { continue }
+                switch try decodeControl(frame.payload) {
+                case .nameSet(let payload): return payload.session
+                case .error(let payload): throw TermiodClientError.requestFailed(payload.message)
+                default: continue
+                }
+            }
+        }
+    }
+
     /// The daemon's answer to "what is running?" — which, to be honest, has to
     /// include what *was* running: a daemon that died takes every session with
     /// it, and a live list alone would report that as "nothing". The tombstones

@@ -85,6 +85,11 @@ pub struct Tombstone {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub custom_name: Option<String>,
+    #[serde(default)]
+    pub custom_name_revision: u64,
+
     /// The workstream status the session last reported (`working`, `needs_you`,
     /// …). A session that died while `needs_you` is a different story from one
     /// that died `idle`, and that difference is exactly what the user lost.
@@ -119,6 +124,8 @@ impl Tombstone {
             ended_unix: now_unix(),
             agent_id: info.agent_id.clone(),
             title: info.title.clone(),
+            custom_name: info.custom_name.clone(),
+            custom_name_revision: info.custom_name_revision,
             status: info.status.clone(),
             child_executable_replaced: info.child_executable_replaced,
         }
@@ -140,6 +147,10 @@ struct RosterEntry {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    custom_name: Option<String>,
+    #[serde(default)]
+    custom_name_revision: u64,
+    #[serde(default)]
     status: String,
 }
 
@@ -153,6 +164,8 @@ impl RosterEntry {
             created_unix: info.created_unix,
             agent_id: info.agent_id.clone(),
             title: info.title.clone(),
+            custom_name: info.custom_name.clone(),
+            custom_name_revision: info.custom_name_revision,
             status: info.status.clone(),
         }
     }
@@ -169,6 +182,8 @@ impl RosterEntry {
             ended_unix: now_unix(),
             agent_id: self.agent_id,
             title: self.title,
+            custom_name: self.custom_name,
+            custom_name_revision: self.custom_name_revision,
             status: self.status,
             // Both roads here — a daemon that died under the session, and one
             // that stopped before the ordinary reaper reached it — skip the exit
@@ -365,9 +380,21 @@ impl Graveyard {
             if state.buried.contains(&GraveKey::from_info(info)) {
                 return;
             }
-            state
+            // Replies from concurrent control channels can be resumed out of order.
+            if state
                 .roster
-                .insert(SessionId::new(info.id.clone()), RosterEntry::from_info(info));
+                .get(&SessionId::new(info.id.clone()))
+                .is_some_and(|entry| {
+                    entry.created_unix == info.created_unix
+                        && entry.custom_name_revision > info.custom_name_revision
+                })
+            {
+                return;
+            }
+            state.roster.insert(
+                SessionId::new(info.id.clone()),
+                RosterEntry::from_info(info),
+            );
         }
         if let Err(error) = self.persist_roster() {
             eprintln!("termiod: could not record live session: {error:#}");
@@ -494,6 +521,8 @@ mod tests {
             agent_id: Some("claude".to_string()),
             project: Some("/work".to_string()),
             title: Some("fixing the parser".to_string()),
+            custom_name: None,
+            custom_name_revision: 0,
             attached_clients: 0,
             writer_client_id: None,
             foreground_pid: None,
@@ -506,10 +535,34 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("termiod-graves-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("termiod-graves-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn custom_names_survive_crash_roster_and_burial() {
+        let dir = temp_dir("custom-name");
+        let graveyard = Graveyard::open_retaining(&dir, &[]).unwrap();
+        let mut named = info("named");
+        named.custom_name = Some("release checks".into());
+        named.custom_name_revision = 2;
+        graveyard.note_live(&named);
+        // A delayed creation/rename reply cannot replace the newer label on disk.
+        graveyard.note_live(&info("named"));
+        drop(graveyard);
+        let reopened = Graveyard::open_retaining(&dir, &[]).unwrap();
+        let graves = reopened.all();
+        assert_eq!(graves[0].custom_name.as_deref(), Some("release checks"));
+        assert_eq!(graves[0].custom_name_revision, 2);
+        named.id = "normally-exited".into();
+        reopened.bury(&named, EndReason::Exited, Some(0));
+        assert!(reopened
+            .all()
+            .iter()
+            .all(|grave| grave.custom_name == named.custom_name));
     }
 
     /// The ordinary end: the daemon that owned the session records why it went.

@@ -63,6 +63,76 @@ final class TermiodWireOrderIntegrationTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    func testSessionNamesAreFetchedByIndependentClientsAndDoNotChangeIdentity() throws {
+        let handle = "name-test-\(UUID().uuidString.prefix(8))"
+        let link = TermiodSessionLink(
+            sessionName: handle,
+            specification: Termiod.CreateSpecification(
+                cwd: NSTemporaryDirectory(), argv: ["/bin/cat"], env: [], rows: 24, cols: 80,
+                customName: "Creation name"), rows: 24, cols: 80)
+        let attached = expectation(description: "session exists")
+        link.onDaemonSessionID = { _ in attached.fulfill() }
+        link.start()
+        defer { link.detach() }
+        wait(for: [attached], timeout: 10)
+        // Every call opens a separate control connection, as independent viewers do.
+        let first = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == handle })
+        XCTAssertEqual(first.customName, "Creation name")
+        XCTAssertEqual(first.customNameRevision, 1)
+        let renamed = try XCTUnwrap(Termiod.setSessionName(
+            target: first.id, name: "Renamed λ", ifUnset: false))
+        XCTAssertEqual(renamed.customNameRevision, 2)
+        let fetched = try XCTUnwrap(Termiod.roster().sessions.first { $0.id == first.id })
+        XCTAssertEqual(fetched.customName, "Renamed λ")
+        XCTAssertEqual(fetched.name, handle)
+        XCTAssertEqual(fetched.pid, first.pid)
+        XCTAssertEqual(fetched.title, first.title)
+        _ = try Termiod.setSessionName(target: first.id, name: nil, ifUnset: false)
+        _ = try Termiod.setSessionName(target: first.id, name: "Stale cached name", ifUnset: true)
+        let cleared = try XCTUnwrap(Termiod.roster().sessions.first { $0.id == first.id })
+        XCTAssertNil(cleared.customName)
+        XCTAssertEqual(cleared.customNameRevision, 3)
+        XCTAssertEqual(cleared.pid, first.pid)
+    }
+
+    @MainActor
+    func testStoreMigratesAnExistingNameAndPublishesSubsequentEdits() async throws {
+        var session = Session(title: "Terminal 1", agent: .terminal)
+        session.givenTitle = "Legacy owner name"
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "name-store-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        let link = TermiodSessionLink(
+            sessionName: session.id.uuidString,
+            specification: Termiod.CreateSpecification(
+                cwd: NSTemporaryDirectory(), argv: ["/bin/cat"], env: [], rows: 24, cols: 80),
+            rows: 24, cols: 80)
+        let attached = expectation(description: "legacy session exists")
+        link.onDaemonSessionID = { _ in attached.fulfill() }
+        link.start()
+        defer { link.detach() }
+        await fulfillment(of: [attached], timeout: 10)
+        let device = KnownDevice(alias: nil, deviceID: nil)
+        store.reconcileExternalSessions(try Termiod.roster().sessions, from: device, route: .local)
+        for _ in 0..<500 where store.session(session.id)?.pendingName != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(store.session(session.id)?.pendingName)
+        let migrated = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == session.id.uuidString })
+        XCTAssertEqual(migrated.customName, "Legacy owner name")
+        store.setSessionName("Edited in client", for: session.id)
+        for _ in 0..<500 where store.session(session.id)?.pendingName != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(store.session(session.id)?.pendingName)
+        XCTAssertEqual(try Termiod.roster().sessions.first { $0.id == migrated.id }?.customName, "Edited in client")
+        _ = try Termiod.setSessionName(target: migrated.id, name: "Edited elsewhere", ifUnset: false)
+        store.reconcileExternalSessions(try Termiod.roster().sessions, from: device, route: .local)
+        XCTAssertEqual(store.session(session.id)?.givenTitle, "Edited elsewhere")
+        XCTAssertNil(store.session(session.id)?.pendingName)
+    }
+
     /// What arrived, in the order it arrived. Recorded rather than asserted
     /// inline because the claim under test *is* the sequence.
     private enum Arrival {
