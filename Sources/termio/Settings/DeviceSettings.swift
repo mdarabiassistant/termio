@@ -32,6 +32,28 @@ extension KnownDevice {
     /// This Mac spells it `local` rather than the empty string `id` uses: this is
     /// a JSON object key a human reads and hand-edits, and `"": {…}` is neither.
     var settingsKey: String { deviceID ?? alias ?? "local" }
+
+    /// Settings names machines, while discovery still needs every route. Prefer
+    /// a configured SSH name over a historical address for the same identity.
+    static func remoteSettingsMachines(
+        known: [KnownDevice], configuredAliases: [String]
+    ) -> [KnownDevice] {
+        let configured = Set(configuredAliases)
+        let remote = known.filter { !$0.isLocal }
+        let ordered = remote.filter { configured.contains($0.id) }
+            + remote.filter { !configured.contains($0.id) }
+        var seenAliases = Set<String>()
+        var seenDevices = Set<String>()
+        var machines = ordered.filter { machine in
+            guard seenAliases.insert(machine.id).inserted else { return false }
+            guard let identity = machine.deviceID else { return true }
+            return seenDevices.insert(identity).inserted
+        }
+        for alias in configuredAliases where seenAliases.insert(alias).inserted {
+            machines.append(KnownDevice(alias: alias, deviceID: nil))
+        }
+        return machines
+    }
 }
 
 // MARK: - Authored

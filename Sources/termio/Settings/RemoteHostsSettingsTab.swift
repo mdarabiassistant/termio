@@ -150,10 +150,8 @@ struct RemoteHostsSettingsTab: View {
     /// This Mac is filtered out rather than led with: it has its own tab, and a
     /// roster that also carried it would be two doors to one pane.
     private var machines: [KnownDevice] {
-        let known = DeviceRoster.known(in: store)
-        return known.filter { !$0.isLocal }
-            + DeviceRoster.unusedAliases(known: known)
-                .map { KnownDevice(alias: $0, deviceID: nil) }
+        KnownDevice.remoteSettingsMachines(
+            known: DeviceRoster.known(in: store), configuredAliases: hosts.map(\.alias))
     }
 
     /// The `~/.ssh/config` block that reaches this machine, when one names it.
