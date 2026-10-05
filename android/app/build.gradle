@@ -13,6 +13,7 @@ android {
         targetSdk 34
         versionCode Integer.parseInt(System.getenv('TERMIO_ANDROID_VERSION_CODE') ?: '8')
         versionName System.getenv('TERMIO_ANDROID_VERSION') ?: '0.7.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
 
     compileOptions {
@@ -35,10 +36,14 @@ dependencies {
     implementation 'androidx.camera:camera-view:1.6.2'
     implementation 'androidx.camera:camera-mlkit-vision:1.6.2'
     implementation 'com.google.mlkit:barcode-scanning:17.3.0'
-    implementation 'io.github.sagernet:libghostty-android:0.1.0-alpha01'
-    implementation 'io.github.sagernet:libghostty-android-compose:0.1.0-alpha01'
+    implementation project(':ghostty')
+    implementation('io.github.sagernet:libghostty-android-compose:0.1.0-alpha01') {
+        exclude group: 'io.github.sagernet', module: 'libghostty-android'
+    }
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20250517'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'junit:junit:4.13.2'
 }

@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = 'TermioAndroid'
 include ':app'
+include ':ghostty'
