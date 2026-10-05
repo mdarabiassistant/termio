@@ -185,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             TermioStore.reconcileLocalDaemon()
         }
         store.refreshKnownDeviceSessions()
+        store.startLocalSessionDiscovery()
         LaunchTrace.mark("store restored")
         // Task-completion notifications: the delegate must be installed before a
         // notification click can arrive, so wire it before any session runs.
@@ -625,6 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// happen here is the bookkeeping only the running app holds.
     /// Only a real quit reaches here; closing the window does not.
     func applicationWillTerminate(_ notification: Notification) {
+        store.stopLocalSessionDiscovery()
         // A delivered banner taps back into a window that is going away.
         TaskNotificationCenter.shared.withdrawAll()
         // Tree edits are debounced (see `persistSoon`), so flush before the

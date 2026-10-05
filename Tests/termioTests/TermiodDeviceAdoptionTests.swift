@@ -343,6 +343,50 @@ final class RemoteSessionDiscoveryTests: XCTestCase {
         }
     }
 
+    func testLocalDiscoveryTimerFindsSessionsCreatedAfterTheInitialRoster() async throws {
+        let existing = Session(title: "Keep this title", agent: .terminal)
+        let workspace = Workspace(name: "Sessions", terminals: [existing])
+        let store = makeStore(workspaces: [workspace])
+        let empty = try payload()
+        store.refreshDeviceSessions(on: .thisMac) { _ in empty }
+        try await waitForRoster(.local, in: store)
+
+        let live = try payload(name: "created-over-ssh", attached: 1)
+        store.startLocalSessionDiscovery { route in
+            XCTAssertEqual(route, .local)
+            return live
+        }
+        defer { store.stopLocalSessionDiscovery() }
+        let timer = try XCTUnwrap(store.localSessionDiscoveryTimer)
+        store.startLocalSessionDiscovery { _ in empty }
+        XCTAssertTrue(timer === store.localSessionDiscoveryTimer)
+        for _ in 0..<2 {
+            store.rosterFetches[TermiodRoute.local.description]?.settledAt = nil
+            timer.fire()
+            try await waitForRoster(.local, in: store)
+        }
+        XCTAssertEqual(store.allSessions.count, 2)
+        XCTAssertEqual(store.selectedSessionID, existing.id)
+        XCTAssertEqual(store.session(existing.id)?.title, existing.title)
+        XCTAssertEqual(store.allSessions.last?.termiodSessionName, "created-over-ssh")
+        store.stopLocalSessionDiscovery()
+        XCTAssertFalse(timer.isValid)
+        XCTAssertNil(store.localSessionDiscoveryTimer)
+    }
+
+    func testLocalDiscoveryTimerDoesNotPollRemoteRoutes() throws {
+        let store = makeStore(workspaces: [Workspace(name: "Sessions")])
+        store.currentDeviceAlias = "remote"
+        let empty = try payload()
+        store.startLocalSessionDiscovery { _ in
+            XCTFail("A local discovery timer must not poll while viewing a remote device")
+            return empty
+        }
+        defer { store.stopLocalSessionDiscovery() }
+        try XCTUnwrap(store.localSessionDiscoveryTimer).fire()
+        XCTAssertTrue(store.rosterFetches.isEmpty)
+    }
+
     func testKnownDevicesIncludeEmptyRemoteWorkspacesAndLooseSessions() {
         let workspaceAlias = "workspace-\(UUID().uuidString)"
         let sessionAlias = "session-\(UUID().uuidString)"
@@ -541,15 +585,10 @@ final class RemoteDiscoveryIdentityTests: XCTestCase {
         let live = try payload()
         store.refreshDeviceSessions(on: .thisMac) { _ in live }
         try await waitForRoster(.local, in: store)
-        // An attached local session belongs to another local client.
-        XCTAssertTrue(store.allSessions.isEmpty)
-        let detached = try JSONDecoder().decode(Termiod.SessionsPayload.self, from: Data("""
-        {"sessions":[{"id":"local-daemon","name":"local-shell","pid":43,
-          "alive":true,"cwd":"/srv/work","attachedClients":0}]}
-        """.utf8))
-        store.refreshDeviceSessions(on: .thisMac) { _ in detached }
-        try await waitForRoster(.local, in: store)
-        XCTAssertEqual(store.workspaces.first { $0.device.isThisMac }?.terminals.first?.termiodSessionName, "local-shell")
+        let adopted = store.workspaces.first { $0.device.isThisMac }?.terminals.first
+        XCTAssertEqual(adopted?.termiodSessionName, "existing-shell")
+        XCTAssertEqual(adopted?.termiodDaemonID, "existing-daemon")
+        XCTAssertEqual(store.allSessions.count, 1)
         XCTAssertTrue(store.sessions(inWorkspace: remote.id).isEmpty)
         XCTAssertEqual(store.currentWorkspaceID, remote.id)
     }

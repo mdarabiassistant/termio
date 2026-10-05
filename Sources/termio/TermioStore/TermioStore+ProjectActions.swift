@@ -1423,7 +1423,7 @@ extension TermioStore {
         // it instead of spawning the replacement. Killed by name — the
         // revert-to-shell path reaches here *after* `applyTermiodExit` already
         // nil'd the link, so a link-addressed kill was always a no-op there —
-        // but never journaled: the respawn reuses this very name, and a
+        // but never journaled: app-authored sessions reuse their name, and a
         // journaled name is killed on sight by the roster sweep.
         destroyDaemonSession(for: session, rememberClosed: false)
         // The old daemon session's id dies with it, and the respawn's is not
@@ -1432,7 +1432,12 @@ extension TermioStore {
         // respawned session's fresh id as legitimate reuse — sparing the very
         // orphan the close meant to end. Nil is honest: an id-less record for
         // an app-authored (UUID) name still claims by name.
-        updateSession(id) { $0.termiodDaemonID = nil }
+        updateSession(id) {
+            $0.termiodDaemonID = nil
+            // An explicit relaunch creates a session owned by this viewer.
+            // Ordinary attachment to an adopted session must never create one.
+            $0.termiodSessionName = nil
+        }
         surfaces[id] = nil
         monitors[id] = nil
         processSpawnedAt[id] = nil

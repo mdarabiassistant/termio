@@ -1062,6 +1062,7 @@ final class TermioStore: ObservableObject {
     }
 
     var rosterFetches: [String: RosterFetch] = [:]
+    var localSessionDiscoveryTimer: Timer?
     var sessionNameUploads: Set<Session.ID> = []
 
     /// Routes whose daemon this app has asked to stop and is waiting to see come

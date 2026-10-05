@@ -77,17 +77,7 @@ final class ExternalSessionResolutionTests: XCTestCase {
     func testAJournaledNameIsKilledOnSight() {
         XCTAssertEqual(
             TermioStore.resolveExternalSession(
-                name: "orphan", rowID: "aaaa1111", attachedClients: 0, isLocal: true,
-                journaled: record("orphan")),
-            .killOnSight)
-    }
-
-    /// The journal outranks an attached client: a journaled name is this app's
-    /// own closed session, and the close already promised it would end.
-    func testTheJournalOutranksAnAttachedClient() {
-        XCTAssertEqual(
-            TermioStore.resolveExternalSession(
-                name: "orphan", rowID: "aaaa1111", attachedClients: 1, isLocal: true,
+                rowID: "aaaa1111",
                 journaled: record("orphan")),
             .killOnSight)
     }
@@ -99,7 +89,7 @@ final class ExternalSessionResolutionTests: XCTestCase {
     func testASameNamedRowWithADifferentIDIsSparedTheKill() {
         XCTAssertEqual(
             TermioStore.resolveExternalSession(
-                name: "build", rowID: "bbbb2222", attachedClients: 0, isLocal: true,
+                rowID: "bbbb2222",
                 journaled: record("build", daemonID: "aaaa1111")),
             .adopt)
     }
@@ -125,33 +115,9 @@ final class ExternalSessionResolutionTests: XCTestCase {
                 + "identity unproven means safety over kill")
     }
 
-    /// The local socket is per-uid, so an attached unknown on this Mac is a
-    /// second install's live session — the one place attachment proves
-    /// foreign ownership.
-    func testAnAttachedStrangerIsLeftAloneOnThisMac() {
+    func testAnUnknownSessionIsAdopted() {
         XCTAssertEqual(
-            TermioStore.resolveExternalSession(
-                name: "theirs", rowID: "cccc3333", attachedClients: 1, isLocal: true,
-                journaled: nil),
-            .leaveAlone)
-    }
-
-    /// On a remote device the roster is that box's whole sidebar, and
-    /// attachment is read-many by design — a session the phone has open is
-    /// still one of the box's own sessions, so it gets a row like any other.
-    func testAnAttachedStrangerIsAdoptedOnARemoteDevice() {
-        XCTAssertEqual(
-            TermioStore.resolveExternalSession(
-                name: "phones", rowID: "cccc3333", attachedClients: 1, isLocal: false,
-                journaled: nil),
-            .adopt)
-    }
-
-    func testADetachedStrangerIsAdopted() {
-        XCTAssertEqual(
-            TermioStore.resolveExternalSession(
-                name: "cli-started", rowID: "cccc3333", attachedClients: 0, isLocal: true,
-                journaled: nil),
+            TermioStore.resolveExternalSession(rowID: "cccc3333", journaled: nil),
             .adopt)
     }
 
@@ -183,14 +149,18 @@ final class ExternalSessionSweepTests: XCTestCase {
     }
 
     private func information(
-        name: String, id: String? = nil, cwd: String = "", attached: Int = 0
+        name: String, id: String? = nil, cwd: String = "", attached: Int = 0,
+        childCwd: String? = nil, project: String? = nil, alive: Bool = true
     ) throws -> Termiod.SessionInformation {
-        let json = """
-        {"id": "\(id ?? "\(name)-id")", "name": "\(name)", "pid": 1, "alive": true,
-         "cwd": "\(cwd)", "command": "", "status": "unknown",
-         "createdUnix": 0, "attachedClients": \(attached)}
-        """
-        return try JSONDecoder().decode(Termiod.SessionInformation.self, from: Data(json.utf8))
+        var row: [String: Any] = [
+            "id": id ?? "\(name)-id", "name": name, "pid": 1, "alive": alive,
+            "cwd": cwd, "command": "", "status": "unknown", "createdUnix": 0,
+            "attachedClients": attached,
+        ]
+        row["childCwd"] = childCwd
+        row["project"] = project
+        return try JSONDecoder().decode(
+            Termiod.SessionInformation.self, from: JSONSerialization.data(withJSONObject: row))
     }
 
     func testANameMatchingACurrentRowChangesNothing() throws {
@@ -219,8 +189,10 @@ final class ExternalSessionSweepTests: XCTestCase {
         store.journalClosedSession(named: orphan, sshAlias: nil)
 
         let before = store.allSessions.count
-        try store.reconcileExternalSessions(
-            [information(name: orphan)], from: .thisMac, route: .local)
+        for attached in [0, 1] {
+            try store.reconcileExternalSessions(
+                [information(name: orphan, attached: attached)], from: .thisMac, route: .local)
+        }
 
         XCTAssertEqual(store.allSessions.count, before,
                        "this app's own orphan was adopted instead of killed")
@@ -258,20 +230,67 @@ final class ExternalSessionSweepTests: XCTestCase {
             "the stranger belongs in the workspace's loose terminals")
     }
 
-    func testAnAttachedStrangerGetsNoRowOnThisMac() throws {
-        let (store, _, _) = makeStore()
+    func testAttachedLocalSessionsAreAdoptedOnceWithoutChangingExistingRows() throws {
+        let existing = (0..<3).map { Session(title: "Local \($0)", agent: .terminal) }
+        let workspace = Workspace(name: "Sessions", terminals: existing)
+        let settings = AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString) ?? .standard)
+        let store = TermioStore(workspaces: [workspace], settings: settings)
+        store.selectedSessionID = existing[1].id
+        let external = try (0..<4).map {
+            try information(name: UUID().uuidString, id: "external-\($0)", attached: 1)
+        }
+        let live = try existing.map {
+            try information(name: $0.id.uuidString, id: "local-\($0.id)", attached: 1)
+        } + external
 
-        let before = store.allSessions.count
-        try store.reconcileExternalSessions(
-            [information(name: "theirs", attached: 1)], from: .thisMac, route: .local)
+        store.reconcileExternalSessions(live, from: .thisMac, route: .local)
+        store.reconcileExternalSessions(live, from: .thisMac, route: .local)
 
-        XCTAssertEqual(store.allSessions.count, before,
-                       "a second install's live session is not ours to claim")
+        XCTAssertEqual(store.allSessions.count, 7)
+        XCTAssertEqual(store.workspaces[0].terminals.prefix(3).map(\.id), existing.map(\.id))
+        XCTAssertEqual(store.workspaces[0].terminals.prefix(3).map(\.title), existing.map(\.title))
+        XCTAssertEqual(store.selectedSessionID, existing[1].id)
+        XCTAssertEqual(store.currentWorkspaceID, workspace.id)
+        for row in external {
+            let adopted = store.allSessions.filter { $0.termiodDaemonID == row.id }
+            XCTAssertEqual(adopted.count, 1)
+            XCTAssertEqual(adopted.first?.termiodSessionName, row.name)
+            XCTAssertNil(adopted.first?.termiodRemoteHost)
+        }
+
+        let restored = try JSONDecoder().decode(
+            [Workspace].self, from: JSONEncoder().encode(store.workspaces))
+        let relaunched = TermioStore(workspaces: restored, settings: settings)
+        relaunched.reconcileExternalSessions(live, from: .thisMac, route: .local)
+        XCTAssertEqual(relaunched.allSessions.map(\.id), store.allSessions.map(\.id))
     }
 
-    /// The guard is local-only: on a remote device an attached session is still
-    /// one of that box's own sessions — read-many is the design — and hiding it
-    /// would hide the box's work from the Mac.
+    func testAdoptionUsesCurrentDirectoryBeforeOriginalDirectory() throws {
+        let (store, _, _) = makeStore()
+        try store.reconcileExternalSessions([
+            information(name: "external", cwd: "/old/path", attached: 1,
+                        childCwd: "/code/termio/Sources"),
+        ], from: .thisMac, route: .local)
+        XCTAssertEqual(store.projects[0].sessions.first?.termiodSessionName, "external")
+        XCTAssertEqual(store.projects[0].sessions.first?.termiodRemoteCwd, "/code/termio/Sources")
+    }
+
+    func testAdoptionUsesProjectWhenBothDirectoriesAreEmpty() throws {
+        let (store, _, _) = makeStore()
+        try store.reconcileExternalSessions([
+            information(name: "external", attached: 1, project: "/code/termio"),
+        ], from: .thisMac, route: .local)
+        XCTAssertEqual(store.projects[0].sessions.first?.termiodSessionName, "external")
+    }
+
+    func testEndedExternalSessionIsNotAdopted() throws {
+        let (store, _, _) = makeStore()
+        try store.reconcileExternalSessions([
+            information(name: "ended", attached: 1, alive: false),
+        ], from: .thisMac, route: .local)
+        XCTAssertTrue(store.allSessions.isEmpty)
+    }
+
     func testAnAttachedStrangerIsAdoptedOnARemoteDevice() throws {
         let (store, _, _) = makeStore()
         let device = KnownDevice(alias: "vps", deviceID: nil)

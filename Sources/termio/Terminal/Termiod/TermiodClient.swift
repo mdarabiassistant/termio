@@ -914,9 +914,11 @@ extension Termiod {
     static func withControlChannel<Result>(
         route: TermiodRoute = .local,
         caps: [String] = controlCapabilities,
+        autostart: Bool = true,
         _ body: (Transport, Handshake) throws -> Result
     ) throws -> Result {
-        let transport = try Transport.open(route)
+        let transport = try route == .local && !autostart
+            ? Transport.existingLocal() : Transport.open(route)
         defer { transport.close() }
         do {
             let handshake = try performHello(transport, role: "control", caps: caps)
@@ -1098,8 +1100,8 @@ extension Termiod {
     /// it, and a live list alone would report that as "nothing". The tombstones
     /// ride the same reply, so there is no second round trip and no window where
     /// the two disagree.
-    static func roster(route: TermiodRoute = .local) throws -> SessionsPayload {
-        try withControlChannel(route: route) { transport, _ in
+    static func roster(route: TermiodRoute = .local, autostart: Bool = true) throws -> SessionsPayload {
+        try withControlChannel(route: route, autostart: autostart) { transport, _ in
             try writeFrame(transport.writeDescriptor, kind: .control, payload: listPayload())
             while true {
                 let frame = try readFrame(transport.readDescriptor)
@@ -1322,7 +1324,7 @@ final class TermiodSessionLink: @unchecked Sendable {
     /// name a session already had on the device when it was adopted. Readable
     /// because the store keys its tombstones by it.
     let sessionName: String
-    private let specification: Termiod.CreateSpecification
+    private let specification: Termiod.CreateSpecification?
     /// The road to the device this session lives on — `.local` for this Mac's
     /// daemon, `.ssh(alias)` for another box. The framed protocol and every other
     /// field are identical either way; only how the pipe is opened differs.
@@ -1545,7 +1547,7 @@ final class TermiodSessionLink: @unchecked Sendable {
     /// to be shown — but the Mac also makes surfaces for sessions nobody is
     /// showing, and the attach frame is where one says so.
     init(sessionName: String,
-         specification: Termiod.CreateSpecification,
+         specification: Termiod.CreateSpecification?,
          route: TermiodRoute = .local,
          rows: Int,
          cols: Int,
@@ -1602,7 +1604,7 @@ final class TermiodSessionLink: @unchecked Sendable {
             // predates the field: the host would drop it and spawn a plain
             // shell, and a pane labeled Claude Code holding someone's login
             // shell is worse than a pane that says why it refused.
-            if specification.command != nil,
+            if specification?.command != nil,
                !handshake.capabilities.contains(Termiod.spawnCommandCapability) {
                 throw TermiodClientError.requestFailed(localized(
                     "This device’s termiod is too old to launch agents. Set up the device again in Settings › Machines."))
