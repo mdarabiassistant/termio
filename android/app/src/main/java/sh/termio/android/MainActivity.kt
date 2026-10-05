@@ -82,6 +82,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -365,10 +366,10 @@ private fun SessionList(
                         }
                     }
                     if (connection.connected && connection.error.isEmpty()) {
-                        val sessions = connection.projects.flatMap { project ->
-                            project.sessions.map { project.id to it }
-                        }
-                        if (sessions.isEmpty()) item(key = "${machine.id}:empty") {
+                        val groups = connection.projects.filter { it.sessions.isNotEmpty() }
+                            .groupBy { it.deviceAlias }.entries.sortedBy { it.key.isNotEmpty() }
+                        val showMachineHeadings = groups.any { it.key.isNotEmpty() }
+                        if (groups.isEmpty()) item(key = "${machine.id}:empty") {
                             Surface(shape = RoundedCornerShape(16.dp),
                                 color = MaterialTheme.colorScheme.surfaceContainerLow) {
                                 Row(Modifier.fillMaxWidth().padding(20.dp),
@@ -381,12 +382,29 @@ private fun SessionList(
                                 }
                             }
                         }
-                        itemsIndexed(sessions, key = { _, (projectID, session) ->
-                            "${machine.id}:session:$projectID:${session.id}"
-                        }) { sessionIndex, (_, session) ->
-                            if (sessionIndex > 0) HorizontalDivider(Modifier.padding(start = 48.dp, end = 12.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                            SessionRow(session, onOpen = { client.openSession(machine.id, session) })
+                        groups.forEachIndexed { groupIndex, (alias, projects) ->
+                            val sessions = projects.flatMap { project -> project.sessions.map { project.id to it } }
+                            if (showMachineHeadings) item(key = "${machine.id}:device:$alias") {
+                                Row(Modifier.fillMaxWidth()
+                                    .padding(start = 12.dp, end = 12.dp, top = if (groupIndex == 0) 8.dp else 20.dp, bottom = 8.dp)
+                                    .semantics(mergeDescendants = true) { heading() },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Text(alias.ifEmpty { "This machine" }, modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("${sessions.size} ${if (sessions.size == 1) "session" else "sessions"}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            itemsIndexed(sessions, key = { _, (projectID, session) ->
+                                "${machine.id}:session:$projectID:${session.id}"
+                            }) { sessionIndex, (_, session) ->
+                                if (sessionIndex > 0) HorizontalDivider(Modifier.padding(start = 48.dp, end = 12.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                                SessionRow(session, onOpen = { client.openSession(machine.id, session) })
+                            }
                         }
                     }
                 }

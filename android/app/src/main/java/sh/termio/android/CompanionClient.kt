@@ -165,7 +165,8 @@ object CompanionProtocol {
                     session.optString("agent"), session.optString("status"))
             }
             RemoteProject(id, project.optString("name", "Project"), project.optString("workspaceID"),
-                project.optString("workspaceName", "Workspace"), project.optString("deviceAlias"), rows)
+                project.optString("workspaceName", "Workspace"),
+                if (project.isNull("deviceAlias")) "" else project.optString("deviceAlias"), rows)
         }
     }
 
