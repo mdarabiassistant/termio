@@ -56,22 +56,32 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -279,6 +289,13 @@ private fun SessionList(
     collapsedMachineIDs: List<String>,
     toggleMachine: (String) -> Unit,
 ) {
+    val reordering = remember { MachineReorderState() }
+    val moveMachine: (String, String, Boolean) -> Unit = { id, targetID, after ->
+        val firstVisibleIndex = listState.firstVisibleItemIndex
+        val firstVisibleOffset = listState.firstVisibleItemScrollOffset
+        client.moveMachine(id, targetID, after)
+        listState.requestScrollToItem(firstVisibleIndex, firstVisibleOffset)
+    }
     var pendingDeletionID by rememberSaveable { mutableStateOf<String?>(null) }
     val pendingDeletion = state.machines.firstOrNull { it.machine.id == pendingDeletionID }?.machine
     if (pendingDeletion != null) AlertDialog(
@@ -298,70 +315,79 @@ private fun SessionList(
     LaunchedEffect(state.showingPairing) {
         if (state.showingPairing) listState.scrollToItem(0)
     }
-    LazyColumn(modifier, state = listState,
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 24.dp)) {
-        if (state.showingPairing || state.machines.isEmpty()) item(key = "pairing") {
-            PairPage(state, client, Modifier.fillMaxWidth().padding(bottom = 12.dp))
-        }
-        state.machines.forEachIndexed { index, linked ->
-            val machine = linked.machine
-            val connection = linked.connection
-            val expanded = machine.id !in collapsedMachineIDs
-            item(key = "${machine.id}:name") {
-                MachineHeader(linked, expanded, onToggle = { toggleMachine(machine.id) },
-                    onDelete = { pendingDeletionID = machine.id },
-                    onNewTerminal = { client.startTerminal(machine.id) },
-                    modifier = Modifier.padding(top = if (index == 0) 0.dp else 24.dp, bottom = 8.dp))
+    MachineReorderContainer(state.machines, reordering, listState, moveMachine, modifier) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState,
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 24.dp)) {
+            if (state.showingPairing || state.machines.isEmpty()) item(key = "pairing") {
+                PairPage(state, client, Modifier.fillMaxWidth().padding(bottom = 12.dp))
             }
-            if (expanded) {
-                if (connection.error.isNotEmpty()) item(key = "${machine.id}:status") {
-                    Surface(
-                        modifier = Modifier.padding(top = 4.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                    ) {
-                        Column(Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                TermioIcon(TermioSymbol.Alert, Modifier.size(20.dp))
-                                Text(connection.error, style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.weight(1f))
-                            }
-                            OutlinedButton(onClick = { client.retryMachine(machine.id) },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.onErrorContainer)) {
-                                TermioIcon(TermioSymbol.Refresh, Modifier.size(16.dp))
-                                Spacer(Modifier.size(8.dp))
-                                Text("Retry")
-                            }
-                        }
-                    }
+            state.machines.forEachIndexed { index, linked ->
+                val machine = linked.machine
+                val connection = linked.connection
+                val expanded = machine.id !in collapsedMachineIDs
+                item(key = "${machine.id}:name") {
+                    MachineHeader(linked, expanded, onToggle = { toggleMachine(machine.id) },
+                        onDelete = { pendingDeletionID = machine.id },
+                        onNewTerminal = { client.startTerminal(machine.id) },
+                        reordering = reordering,
+                        onMoveUp = state.machines.getOrNull(index - 1)?.let { previous ->
+                            { moveMachine(machine.id, previous.machine.id, false) }
+                        },
+                        onMoveDown = state.machines.getOrNull(index + 1)?.let { next ->
+                            { moveMachine(machine.id, next.machine.id, true) }
+                        },
+                        modifier = Modifier.padding(top = if (index == 0) 0.dp else 24.dp, bottom = 8.dp))
                 }
-                if (connection.connected && connection.error.isEmpty()) {
-                    val sessions = connection.projects.flatMap { project ->
-                        project.sessions.map { project.id to it }
-                    }
-                    if (sessions.isEmpty()) item(key = "${machine.id}:empty") {
-                        Surface(shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                            Row(Modifier.fillMaxWidth().padding(20.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                TermioIcon(TermioSymbol.Terminal, Modifier.size(22.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("Open a project or start a terminal on your Mac, or tap New Terminal here.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (expanded) {
+                    if (connection.error.isNotEmpty()) item(key = "${machine.id}:status") {
+                        Surface(
+                            modifier = Modifier.padding(top = 4.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    TermioIcon(TermioSymbol.Alert, Modifier.size(20.dp))
+                                    Text(connection.error, style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.weight(1f))
+                                }
+                                OutlinedButton(onClick = { client.retryMachine(machine.id) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.onErrorContainer)) {
+                                    TermioIcon(TermioSymbol.Refresh, Modifier.size(16.dp))
+                                    Spacer(Modifier.size(8.dp))
+                                    Text("Retry")
+                                }
                             }
                         }
                     }
-                    itemsIndexed(sessions, key = { _, (projectID, session) ->
-                        "${machine.id}:session:$projectID:${session.id}"
-                    }) { sessionIndex, (_, session) ->
-                        if (sessionIndex > 0) HorizontalDivider(Modifier.padding(start = 48.dp, end = 12.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                        SessionRow(session, onOpen = { client.openSession(machine.id, session) })
+                    if (connection.connected && connection.error.isEmpty()) {
+                        val sessions = connection.projects.flatMap { project ->
+                            project.sessions.map { project.id to it }
+                        }
+                        if (sessions.isEmpty()) item(key = "${machine.id}:empty") {
+                            Surface(shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                                Row(Modifier.fillMaxWidth().padding(20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    TermioIcon(TermioSymbol.Terminal, Modifier.size(22.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Open a project or start a terminal on your Mac, or tap New Terminal here.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        itemsIndexed(sessions, key = { _, (projectID, session) ->
+                            "${machine.id}:session:$projectID:${session.id}"
+                        }) { sessionIndex, (_, session) ->
+                            if (sessionIndex > 0) HorizontalDivider(Modifier.padding(start = 48.dp, end = 12.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                            SessionRow(session, onOpen = { client.openSession(machine.id, session) })
+                        }
                     }
                 }
             }
@@ -376,30 +402,66 @@ private fun MachineHeader(
     onToggle: () -> Unit,
     onDelete: () -> Unit,
     onNewTerminal: () -> Unit,
+    reordering: MachineReorderState,
+    onMoveUp: (() -> Unit)?,
+    onMoveDown: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val connection = linked.connection
     val count = connection.projects.sumOf { it.sessions.size }
-    Surface(modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+    val id = linked.machine.id
+    val canReorder = onMoveUp != null || onMoveDown != null
+    val indicatorColor = MaterialTheme.colorScheme.primary
+    DisposableEffect(id, reordering) {
+        onDispose {
+            reordering.headers.remove(id)
+            reordering.handles.remove(id)
+        }
+    }
+    Surface(modifier.fillMaxWidth()
+        .onGloballyPositioned {
+            reordering.headers[id] = it.boundsInRoot()
+            reordering.updateTarget()
+        }
+        .alpha(if (reordering.draggedID == id) 0.45f else 1f)
+        .drawWithContent {
+            drawContent()
+            reordering.target?.takeIf { it.id == id }?.let { target ->
+                val y = if (target.after) size.height else 0f
+                drawLine(indicatorColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 3.dp.toPx())
+            }
+        }, shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.padding(start = 12.dp).size(48.dp)
+                    .onGloballyPositioned { reordering.handles[id] = it.boundsInRoot() }
+                    .semantics {
+                        if (canReorder) {
+                            contentDescription = "Reorder ${linked.machine.name}"
+                            customActions = buildList {
+                                onMoveUp?.let { add(CustomAccessibilityAction("Move up") { it(); true }) }
+                                onMoveDown?.let { add(CustomAccessibilityAction("Move down") { it(); true }) }
+                            }
+                        }
+                    }, contentAlignment = Alignment.Center) {
+                    Surface(shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer) {
+                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            TermioIcon(if (canReorder) TermioSymbol.Drag else TermioSymbol.Machine, Modifier.size(22.dp))
+                        }
+                    }
+                }
                 Row(Modifier.weight(1f)
                     .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
                     .clickable(role = Role.Button,
                         onClickLabel = if (expanded) "Collapse ${linked.machine.name}" else "Expand ${linked.machine.name}",
                         onClick = onToggle)
-                    .padding(start = 16.dp, top = 14.dp, bottom = 10.dp),
+                    .padding(start = 8.dp, top = 14.dp, bottom = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Surface(shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer) {
-                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                            TermioIcon(TermioSymbol.Machine, Modifier.size(22.dp))
-                        }
-                    }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(linked.machine.name, style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)

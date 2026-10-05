@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.unit.dp
 
 internal enum class TermioSymbol(val path: String) {
+    Drag("M8,6 H8.01 M16,6 H16.01 M8,12 H8.01 M16,12 H16.01 M8,18 H8.01 M16,18 H16.01"),
     Machine("M4,4 H20 Q21,4 21,5 V15 Q21,16 20,16 H4 Q3,16 3,15 V5 Q3,4 4,4 Z M12,16 V20 M8,20 H16"),
     Refresh("M20,10 A8,8 0,0 0,6,6 L3,9 M3,4 V9 H8 M4,14 A8,8 0,0 0,18,18 L21,15 M16,15 H21 V20"),
     Plus("M12,5 V19 M5,12 H19"),
