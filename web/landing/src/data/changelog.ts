@@ -17,6 +17,20 @@ export type ChangelogEntry = {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "0.55.5",
+    date: "2026-10-05",
+    title: "SSH-created sessions appear on the local Mac",
+    changes: {
+      improved: [
+        "The local session list refreshes while this Mac is selected, so sessions started elsewhere appear without restarting the app.",
+      ],
+      fixed: [
+        "Sessions created over SSH appear in the local Mac sidebar even while another client remains attached, without duplicating existing rows or changing the current selection.",
+        "Viewing a discovered session that has already ended no longer silently starts a replacement. Relaunch remains available when you want a new session.",
+      ],
+    },
+  },
+  {
     version: "0.55.4",
     date: "2026-10-03",
     title: "All your machines in one sidebar",
