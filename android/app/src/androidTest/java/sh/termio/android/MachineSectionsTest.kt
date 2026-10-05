@@ -1,17 +1,25 @@
 package sh.termio.android
 
 import android.content.Context
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotDisplayed
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
+import androidx.compose.ui.test.swipeUp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -100,6 +108,77 @@ class MachineSectionsTest {
     }
 
     @Test
+    fun draggingBothDirectionsPreservesConnectionsCollapseAndSavedOrder() {
+        compose.onNodeWithText("Studio Mac").performClick()
+        dragMachine("Studio Mac", "Build Mac", after = true)
+        assertEquals(listOf("second", "first"), savedOrder())
+        assertCollapsed("Studio Mac")
+        compose.onNodeWithText("First session").assertDoesNotExist()
+        compose.onNodeWithText("Second session").assertIsDisplayed()
+        assertEquals(1, first.requestCount)
+        assertEquals(1, second.requestCount)
+
+        compose.onNodeWithText("Refresh").performClick()
+        compose.waitUntil(10_000) { first.requestCount == 2 && second.requestCount == 2 }
+        compose.waitForIdle()
+        assertEquals(listOf("second", "first"), savedOrder())
+        assertCollapsed("Studio Mac")
+
+        scenario.close()
+        scenario = ActivityScenario.launch(MainActivity::class.java)
+        awaitText("First session")
+        val firstTop = compose.onNodeWithText("Studio Mac").fetchSemanticsNode().boundsInRoot.top
+        val secondTop = compose.onNodeWithText("Build Mac").fetchSemanticsNode().boundsInRoot.top
+        org.junit.Assert.assertTrue(firstTop > secondTop)
+        dragMachine("Studio Mac", "Build Mac", after = false)
+        assertEquals(listOf("first", "second"), savedOrder())
+    }
+
+    @Test
+    fun cancelledDragKeepsTheOriginalOrder() {
+        dragMachine("Studio Mac", "Build Mac", after = true, cancel = true)
+        assertEquals(listOf("first", "second"), savedOrder())
+        compose.onNodeWithText("First session").assertIsDisplayed()
+        assertEquals(1, first.requestCount)
+        assertEquals(1, second.requestCount)
+    }
+
+    @Test
+    fun dragScrollsPastOffscreenMachinesAndNormalListScrollingStillWorks() {
+        scenario.close()
+        val machines = PairedMachines.restore(preferences.getString("machines", null), null).toMutableList()
+        for (index in 3..7) {
+            val id = "machine-$index"
+            val name = "Machine $index"
+            val server = server(AtomicReference(roster(id, name, "Session $index")))
+            machines.add(PairedMachine(id, server.url("/?t=test").toString(), name, id))
+        }
+        preferences.edit().putString("machines", PairedMachines.encode(machines)).commit()
+        scenario = ActivityScenario.launch(MainActivity::class.java)
+        awaitText("First session")
+        compose.onRoot().performTouchInput { swipeUp() }
+        compose.onNodeWithText("Studio Mac").assertIsNotDisplayed()
+        assertEquals(machines.map { it.id }, savedOrder())
+        compose.onNode(hasScrollAction()).performScrollToIndex(0)
+
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val handle = compose.onNodeWithContentDescription("Reorder Studio Mac").fetchSemanticsNode().boundsInRoot
+        compose.mainClock.autoAdvance = false
+        try {
+            compose.onRoot().performTouchInput {
+                down(handle.center - root.topLeft)
+                moveTo(Offset(handle.center.x - root.left, root.height - 4f))
+            }
+            compose.mainClock.advanceTimeBy(3_000)
+            compose.onRoot().performTouchInput { up() }
+        } finally {
+            compose.mainClock.autoAdvance = true
+        }
+        compose.waitForIdle()
+        assertEquals(machines.drop(1).map { it.id } + "first", savedOrder())
+    }
+
+    @Test
     fun flatSessionsAndHeaderActionKeepTheCorrectMachine() {
         val snapshot = JSONObject(firstRoster.get())
         snapshot.getJSONArray("projects").put(JSONObject().put("id", "another-project")
@@ -148,6 +227,23 @@ class MachineSectionsTest {
 
     private fun assertCollapsed(name: String) {
         compose.onNodeWithText(name).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
+    }
+
+    private fun savedOrder() = PairedMachines.restore(preferences.getString("machines", null), null).map { it.id }
+
+    private fun dragMachine(name: String, targetName: String, after: Boolean, cancel: Boolean = false) {
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val source = compose.onNodeWithContentDescription("Reorder $name").fetchSemanticsNode().boundsInRoot
+        val target = compose.onNodeWithContentDescription("Reorder $targetName").fetchSemanticsNode().boundsInRoot
+        val destination = Offset(source.center.x, if (after) target.bottom + target.height else target.top)
+        compose.onRoot().performTouchInput {
+            if (cancel) {
+                down(source.center - root.topLeft)
+                moveTo(destination - root.topLeft)
+                cancel()
+            } else swipe(source.center - root.topLeft, destination - root.topLeft, durationMillis = 500)
+        }
+        compose.waitForIdle()
     }
 
     private fun awaitText(text: String) {

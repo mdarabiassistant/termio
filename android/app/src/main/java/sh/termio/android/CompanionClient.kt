@@ -275,6 +275,19 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
         publish()
     }
 
+    fun moveMachine(id: String, targetID: String, after: Boolean) {
+        if (id == targetID || id !in links || targetID !in links) return
+        val order = links.keys.toMutableList()
+        order.remove(id)
+        order.add(order.indexOf(targetID) + if (after) 1 else 0, id)
+        if (order == links.keys.toList()) return
+        val reordered = order.associateWith { links.getValue(it) }
+        links.clear()
+        links.putAll(reordered)
+        saveMachines()
+        publish()
+    }
+
     fun deleteMachine(id: String) {
         val link = links.remove(id) ?: return
         closeLink(link)
