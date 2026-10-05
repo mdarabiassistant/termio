@@ -37,6 +37,7 @@ data class CompanionState(
     val error: String = "",
     val connected: Boolean = false,
     val hasRoster: Boolean = false,
+    val loadingRoster: Boolean = false,
     val projects: List<RemoteProject> = emptyList(),
     val session: RemoteSession? = null,
     val terminal: GhosttyTerminalSession? = null,
@@ -55,6 +56,9 @@ data class HomeState(
     val pairingAddress: String = "",
     val pairingError: String = "",
 ) {
+    val refreshingSessions: Boolean
+        get() = machines.any { it.connection.loadingRoster }
+
     val selectedConnection: CompanionState?
         get() = machines.firstOrNull { it.machine.id == selectedMachineID }?.connection
 }
@@ -266,6 +270,11 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
         links[id]?.let { it.connection.connect(it.machine.address) }
     }
 
+    fun refreshSessions() {
+        links.values.toList().forEach { it.connection.refreshRoster(it.machine.address) }
+        publish()
+    }
+
     fun deleteMachine(id: String) {
         val link = links.remove(id) ?: return
         closeLink(link)
@@ -281,7 +290,7 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
 
     fun startTerminal(machineID: String) {
         val connection = links[machineID]?.connection ?: return
-        if (!connection.state.value.connected) return
+        if (!connection.state.value.connected || connection.state.value.loadingRoster) return
         leaveSession()
         mutableState.update { it.copy(selectedMachineID = machineID) }
         connection.setForeground(foreground)
@@ -334,7 +343,7 @@ private class MacConnection(private val application: Application, private val cl
     private var cellHeightPixels = 0
     private val retrySession = Runnable { if (state.value.session != null) dialSession() }
     private val rosterTimeout = Runnable {
-        if (!state.value.connected && rosterSocket != null) rosterDisconnected(rosterSocket)
+        if (state.value.loadingRoster && rosterSocket != null) rosterDisconnected(rosterSocket)
     }
 
     fun connect(address: String) {
@@ -348,10 +357,21 @@ private class MacConnection(private val application: Application, private val cl
         dialRoster()
     }
 
+    fun refreshRoster(address: String) {
+        if (state.value.loadingRoster) return
+        if (pairing == null) connect(address) else dialRoster()
+    }
+
     private fun dialRoster() {
         val address = pairing ?: return
         handler.removeCallbacks(rosterTimeout)
-        mutableState.update { it.copy(status = "Connecting…", connected = false) }
+        // A new authenticated connection requests the Mac's complete current roster.
+        // Keep the displayed snapshot and the independent terminal connection intact.
+        val previous = rosterSocket
+        rosterSocket = null
+        previous?.cancel()
+        mutableState.update { it.copy(status = if (it.hasRoster) "Refreshing…" else "Connecting…",
+            loadingRoster = true, error = "") }
         rosterSocket = client.newWebSocket(Request.Builder().url(address.url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 handler.post { if (webSocket === rosterSocket) webSocket.send(CompanionProtocol.authentication(address.token)) }
@@ -382,7 +402,8 @@ private class MacConnection(private val application: Application, private val cl
                     return
                 }
                 handler.removeCallbacks(rosterTimeout)
-                mutableState.update { it.copy(hasRoster = true, connected = true, status = "Connected", error = "",
+                mutableState.update { it.copy(hasRoster = true, loadingRoster = false,
+                    connected = true, status = "Connected", error = "",
                     macName = if (message.isNull("macName")) "" else message.optString("macName"),
                     macID = if (message.isNull("macID")) "" else message.optString("macID"),
                     projects = CompanionProtocol.projects(message)) }
@@ -392,7 +413,8 @@ private class MacConnection(private val application: Application, private val cl
                 if (id.isNotEmpty()) onStarted(RemoteSession(id, "Terminal"))
             }
             "error" -> {
-                if (!state.value.hasRoster || message.optString("code") in listOf("unauthorized", "client_too_old")) {
+                if (state.value.loadingRoster || !state.value.hasRoster ||
+                    message.optString("code") in listOf("unauthorized", "client_too_old")) {
                     stopConnections()
                     mutableState.update { it.copy(status = "", connected = false, error = CompanionProtocol.refusal(message)) }
                 } else mutableState.update { it.copy(error = CompanionProtocol.refusal(message)) }
@@ -408,7 +430,7 @@ private class MacConnection(private val application: Application, private val cl
     }
 
     fun startTerminal() {
-        if (!state.value.connected) return
+        if (!state.value.connected || state.value.loadingRoster) return
         val control = JSONObject().put("t", "startTerminal")
         state.value.projects.firstOrNull()?.workspaceID?.takeIf { it.isNotEmpty() }?.let { control.put("workspace", it) }
         mutableState.update { it.copy(error = "") }
@@ -560,6 +582,7 @@ private class MacConnection(private val application: Application, private val cl
         val socket = rosterSocket
         rosterSocket = null
         socket?.cancel()
+        mutableState.update { it.copy(loadingRoster = false) }
     }
 
     private fun decode(text: String): JSONObject? = try { JSONObject(text) } catch (error: Exception) {
