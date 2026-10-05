@@ -121,6 +121,112 @@ final class TermiodDestroyIntegrationTests: XCTestCase {
         return !daemonHoldsSession(named: name)
     }
 
+    private func makeExternalSession() throws -> (TermiodSessionLink, String) {
+        let name = UUID().uuidString
+        let link = TermiodSessionLink(
+            sessionName: name,
+            specification: Termiod.CreateSpecification(
+                cwd: "", argv: ["/bin/cat"], env: [], rows: 24, cols: 80),
+            rows: 24, cols: 80)
+        link.start()
+        let deadline = Date().addingTimeInterval(5)
+        while !daemonHoldsSession(named: name), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertTrue(daemonHoldsSession(named: name))
+        return (link, name)
+    }
+
+    func testAttachedExternalSessionIsAdoptedAndViewedWithoutTakingTheWriter() async throws {
+        let (owner, name) = try makeExternalSession()
+        defer { owner.detach() }
+        let before = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == name })
+        XCTAssertEqual(before.attachedClients, 1)
+        let settings = AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString) ?? .standard)
+        let viewer = TermioStore(workspaces: [Workspace(name: "Local")], settings: settings)
+        viewer.reconcileExternalSessions([before], from: .thisMac, route: .local)
+        viewer.reconcileExternalSessions([before], from: .thisMac, route: .local)
+        let adopted = try XCTUnwrap(viewer.allSessions.first)
+        XCTAssertEqual(viewer.allSessions.count, 1)
+        XCTAssertEqual(adopted.termiodDaemonID, before.id)
+        XCTAssertEqual(adopted.termiodSessionName, name)
+
+        let attachment = viewer.makeTermiodLink(
+            for: adopted, argv: ["/bin/false"], cwd: NSTemporaryDirectory(), env: [:])
+        let attached = expectation(description: "The adopted session attaches as a reader")
+        attachment.onWriter = { writer in
+            XCTAssertFalse(writer, "Looking at the session took its remote client's input control")
+            attached.fulfill()
+        }
+        attachment.start()
+        defer { attachment.detach() }
+        await fulfillment(of: [attached], timeout: 5)
+        let after = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == name })
+        XCTAssertEqual(after.id, before.id)
+        XCTAssertEqual(after.pid, before.pid)
+        XCTAssertEqual(after.attachedClients, 2)
+    }
+
+    func testAdoptedSessionThatEndsBeforeViewingIsNotRecreated() async throws {
+        let (owner, name) = try makeExternalSession()
+        defer { owner.detach() }
+        let information = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == name })
+        let settings = AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString) ?? .standard)
+        let viewer = TermioStore(workspaces: [Workspace(name: "Local")], settings: settings)
+        viewer.reconcileExternalSessions([information], from: .thisMac, route: .local)
+        let adopted = try XCTUnwrap(viewer.allSessions.first)
+        let killed = expectation(description: "The external client closed the session")
+        Termiod.killSession(target: name) { killed.fulfill() }
+        await fulfillment(of: [killed], timeout: 5)
+        XCTAssertTrue(waitUntilDaemonDrops(name))
+
+        let attachment = viewer.makeTermiodLink(
+            for: adopted, argv: ["/bin/cat"], cwd: NSTemporaryDirectory(), env: [:])
+        let refused = expectation(description: "Attaching to the ended session is refused")
+        attachment.onStartRefused = { _ in refused.fulfill() }
+        attachment.start()
+        defer { attachment.detach() }
+        await fulfillment(of: [refused], timeout: 5)
+        XCTAssertFalse(daemonHoldsSession(named: name))
+        XCTAssertTrue(try Termiod.roster().sessions.filter(\.alive).isEmpty)
+    }
+
+    func testExplicitRelaunchOfAnAdoptedSessionCanCreateItsReplacement() async throws {
+        let (owner, name) = try makeExternalSession()
+        defer { owner.detach() }
+        let information = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == name })
+        let settings = AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString) ?? .standard)
+        let viewer = TermioStore(workspaces: [Workspace(name: "Local")], settings: settings)
+        viewer.reconcileExternalSessions([information], from: .thisMac, route: .local)
+        let adopted = try XCTUnwrap(viewer.allSessions.first)
+        viewer.relaunchSession(adopted.id)
+        XCTAssertTrue(waitUntilDaemonDrops(name))
+        let replacement = try XCTUnwrap(viewer.session(adopted.id))
+        XCTAssertNil(replacement.termiodSessionName)
+        let attachment = viewer.makeTermiodLink(
+            for: replacement, argv: ["/bin/cat"], cwd: NSTemporaryDirectory(), env: [:])
+        let attached = expectation(description: "Explicit relaunch creates the replacement")
+        attachment.onDaemonSessionID = { _ in attached.fulfill() }
+        attachment.start()
+        defer { attachment.detach() }
+        await fulfillment(of: [attached], timeout: 5)
+        let live = try Termiod.roster().sessions.filter(\.alive)
+        XCTAssertEqual(live.count, 1)
+        XCTAssertEqual(live.first?.name, adopted.id.uuidString)
+        XCTAssertNotEqual(live.first?.id, information.id)
+    }
+
+    func testDiscoveryDoesNotStartAStoppedDaemon() throws {
+        daemon?.terminate()
+        daemon?.waitUntilExit()
+        daemon = nil
+        XCTAssertThrowsError(try Termiod.roster(autostart: false)) { error in
+            guard case TermiodClientError.daemonUnreachable = error else {
+                return XCTFail("Expected an unreachable daemon, received \(error)")
+            }
+        }
+    }
+
     /// Removing a project destroys the sessions filed under it. Before the
     /// in-process backend was deleted this was carried by terminating each PTY;
     /// nothing on this side does it implicitly any more.

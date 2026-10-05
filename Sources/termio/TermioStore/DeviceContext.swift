@@ -201,9 +201,9 @@ extension TermioStore {
     ///
     /// This used to feed the sidebar's "Also Running" section; it is now the
     /// roster sweep's candidate list (RFC 20260830 §D3), which resolves each row
-    /// to a kill (a journaled close), an auto-adopted ordinary row, or
-    /// another client's business — see `reconcileExternalSessions`. The device's
-    /// own ordering is kept: it is the authority for this list.
+    /// to a kill (a journaled close) or an auto-adopted ordinary row — see
+    /// `reconcileExternalSessions`. The device's own ordering is kept: it is
+    /// the authority for this list.
     func deviceOnlySessions(
         in live: [Termiod.SessionInformation], for device: KnownDevice
     ) -> [Termiod.SessionInformation] {

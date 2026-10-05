@@ -67,7 +67,7 @@ extension TermioStore {
             // Its uuid for a session Termio opened; the name it already had for
             // one adopted off the device's roster (see `Session.termiodSessionName`).
             sessionName: daemonSessionName(for: session),
-            specification: specification,
+            specification: session.termiodSessionName == nil ? specification : nil,
             route: route,
             rows: Int(opening.rows),
             cols: Int(opening.cols),
@@ -685,6 +685,32 @@ extension TermioStore {
     /// who switches deliberately gets a fresh list.
     private static let rosterCoalescingWindow = Duration.milliseconds(500)
 
+    // A local session may be created over SSH while this app stays in front.
+    // Poll only the local view: remote routes still refresh on navigation, and
+    // checking for new local sessions must never launch a stopped daemon.
+    func startLocalSessionDiscovery(
+        fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
+            try Termiod.roster(route: $0, autostart: false)
+        }
+    ) {
+        guard localSessionDiscoveryTimer == nil else { return }
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            MainActor.assumeIsolated {
+                guard self.currentDevice.isLocal else { return }
+                self.refreshDeviceSessions(on: .thisMac, fetchingRoster: fetchingRoster)
+            }
+        }
+        timer.tolerance = 0.5
+        localSessionDiscoveryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stopLocalSessionDiscovery() {
+        localSessionDiscoveryTimer?.invalidate()
+        localSessionDiscoveryTimer = nil
+    }
+
     func refreshKnownDeviceSessions(
         fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
             try Termiod.roster(route: $0)
@@ -932,8 +958,10 @@ extension TermioStore {
         session.termiodDaemonID = information.id.isEmpty ? nil : information.id
         session.termiodRemoteHost = device.alias
         session.deviceID = device.deviceID
-        session.termiodRemoteCwd = information.cwd.isEmpty ? nil : information.cwd
-        if let projectIndex = adoptionProjectIndex(forCwd: information.cwd, on: device) {
+        let cwd = [information.childCwd, information.cwd, information.project]
+            .compactMap { $0 }.first { !$0.isEmpty }
+        session.termiodRemoteCwd = cwd
+        if let cwd, let projectIndex = adoptionProjectIndex(forCwd: cwd, on: device) {
             projects[projectIndex].sessions.append(session)
             return
         }
@@ -1068,9 +1096,6 @@ extension TermioStore {
         /// The name is in the closed-session journal: this app's own orphan —
         /// D1 should have killed it, so kill it now.
         case killOnSight
-        /// Attached, unknown, **on this Mac**: a second install's live session,
-        /// not ours to claim.
-        case leaveAlone
         /// Unknown and adoptable: give it a row.
         case adopt
     }
@@ -1083,20 +1108,15 @@ extension TermioStore {
     /// A same-named row with a different id is legitimate name reuse, resolved
     /// like any other stranger.
     ///
-    /// The attached-client guard is local-only, deliberately: the local socket
-    /// is per-uid, so an attached unknown here is another install's session.
-    /// Attachment itself is read-many by design (single writer, many readers),
-    /// so on a remote device it is no evidence of foreign ownership — the
-    /// roster is that box's whole sidebar, and a session the phone has open is
-    /// still one of the box's own sessions; skipping it would hide its work.
+    /// A client attached over SSH is also counted on the local daemon. An
+    /// attachment says nothing about ownership, so every unaccounted live
+    /// session gets a row unless this viewer explicitly closed it.
     nonisolated static func resolveExternalSession(
-        name: String, rowID: String, attachedClients: Int, isLocal: Bool,
-        journaled: ClosedDaemonSession?
+        rowID: String, journaled: ClosedDaemonSession?
     ) -> ExternalSessionResolution {
         if let journaled, journalClaims(journaled, rowID: rowID) {
             return .killOnSight
         }
-        if isLocal, attachedClients > 0 { return .leaveAlone }
         return .adopt
     }
 
@@ -1127,9 +1147,8 @@ extension TermioStore {
     /// Settles every live daemon session against this app's rows, once per
     /// successful roster refresh: journaled names are killed on sight (the
     /// belt-and-braces that makes D1's close hold across crashes and offline
-    /// routes), unknown sessions are adopted into ordinary rows, and — on this
-    /// Mac only — an attached unknown is left alone as a second install's live
-    /// session.
+    /// routes), and unknown sessions are adopted into ordinary rows, including
+    /// sessions another client is still viewing.
     ///
     /// A journal record belongs to this sweep when its alias matches the route
     /// **or** its device matches the machine the route resolved to — the alias
@@ -1162,9 +1181,7 @@ extension TermioStore {
             let name = Self.daemonKey(information)
             let record = sweepRecords.first { $0.name == name }
             switch Self.resolveExternalSession(
-                name: name, rowID: information.id,
-                attachedClients: information.attachedClients,
-                isLocal: device.isLocal, journaled: record) {
+                rowID: information.id, journaled: record) {
             case .killOnSight:
                 if let record { claimingRecords.insert(record) }
                 Log.termiod.info("""
@@ -1172,8 +1189,6 @@ extension TermioStore {
                 \(route.description, privacy: .public)
                 """)
                 Termiod.killSession(target: name, route: route)
-            case .leaveAlone:
-                break
             case .adopt:
                 adoptDeviceSession(information, on: device)
             }
