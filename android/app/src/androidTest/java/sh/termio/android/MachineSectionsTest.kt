@@ -34,6 +34,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -179,6 +180,52 @@ class MachineSectionsTest {
     }
 
     @Test
+    fun localAndRemoteSessionsKeepMachineGroupsWithoutProjectHeadings() {
+        val snapshot = JSONObject(firstRoster.get()).put("projects", JSONArray()
+            .put(project("remote-one", "Remote Mac", "Remote 1", "Remote 2"))
+            .put(project("local-one", null, "Local 1", "Local 2"))
+            .put(project("remote-two", "Remote Mac", "Remote 3", "Remote 4"))
+            .put(project("local-two", null, "Local 3").put("deviceAlias", JSONObject.NULL)))
+        firstRoster.set(snapshot.toString())
+        compose.onNodeWithText("Refresh").performClick()
+        awaitText("Local 1")
+
+        val expected = listOf("This machine", "Local 1", "Local 2", "Local 3",
+            "Remote Mac", "Remote 1", "Remote 2", "Remote 3", "Remote 4")
+        expected.zipWithNext().forEach { (before, after) ->
+            compose.onNodeWithText(before).performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText(after).performScrollTo().assertIsDisplayed()
+            assertTrue(compose.onNodeWithText(before).fetchSemanticsNode().boundsInRoot.top <
+                compose.onNodeWithText(after).fetchSemanticsNode().boundsInRoot.top)
+        }
+        compose.onNodeWithText("Hidden project").assertDoesNotExist()
+        compose.onNodeWithText("Development").assertDoesNotExist()
+        compose.onNodeWithText("Remote 4").performClick()
+        compose.waitUntil(10_000) {
+            messages.any { (server, message) -> server === first &&
+                message.optString("t") == "attach" && message.optString("session") == "Remote 4" }
+        }
+        assertTrue(messages.none { (server, message) -> server === second && message.optString("t") == "attach" })
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Studio Mac").performScrollTo().performClick()
+        compose.onNodeWithText("This machine").assertDoesNotExist()
+        compose.onNodeWithText("Remote Mac").assertDoesNotExist()
+        compose.onNodeWithText("Studio Mac").performClick()
+        compose.onNodeWithText("This machine").assertIsDisplayed()
+        compose.onNodeWithText("Remote Mac").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun remoteOnlyRosterStillNamesTheRemoteMachine() {
+        firstRoster.set(JSONObject(firstRoster.get()).put("projects", JSONArray()
+            .put(project("remote", "Remote Mac", "Remote session"))).toString())
+        compose.onNodeWithText("Refresh").performClick()
+        awaitText("Remote session")
+        compose.onNodeWithText("Remote Mac").assertIsDisplayed()
+        compose.onNodeWithText("This machine").assertDoesNotExist()
+    }
+
+    @Test
     fun flatSessionsAndHeaderActionKeepTheCorrectMachine() {
         val snapshot = JSONObject(firstRoster.get())
         snapshot.getJSONArray("projects").put(JSONObject().put("id", "another-project")
@@ -188,6 +235,9 @@ class MachineSectionsTest {
         firstRoster.set(snapshot.toString())
         compose.onNodeWithText("Refresh").performClick()
         awaitText("Session from another project")
+        compose.onNodeWithText("This machine").assertDoesNotExist()
+        compose.onNodeWithText("Another project").assertDoesNotExist()
+        compose.onNodeWithText("Another workspace").assertDoesNotExist()
         compose.onNodeWithText("Session from another project").performScrollTo().performClick()
         compose.waitUntil(10_000) {
             messages.any { (server, message) ->
@@ -266,6 +316,13 @@ class MachineSectionsTest {
     }
 
     private companion object {
+        fun project(id: String, alias: String?, vararg sessions: String) = JSONObject()
+            .put("id", id).put("name", "Hidden project").put("workspaceName", "Development")
+            .apply { if (alias != null) put("deviceAlias", alias) }
+            .put("sessions", JSONArray().apply {
+                sessions.forEach { put(JSONObject().put("id", it).put("title", it)) }
+            })
+
         fun roster(id: String, name: String, session: String): String = JSONObject()
             .put("t", "roster").put("wire", CompanionProtocol.wireVersion)
             .put("macID", id).put("macName", name)

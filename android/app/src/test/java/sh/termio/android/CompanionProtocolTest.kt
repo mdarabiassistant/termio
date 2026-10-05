@@ -61,6 +61,11 @@ class CompanionProtocolTest {
         assertEquals("Update Termio on this phone.", CompanionProtocol.refusal(JSONObject().put("code", "client_too_old")))
     }
 
+    @Test fun rosterDistinguishesRemoteAliasesFromMissingOrNullLocalAliases() {
+        val roster = JSONObject("""{"projects":[{"id":"local"},{"id":"also-local","deviceAlias":null},{"id":"remote","deviceAlias":"Build Mac"}]}""")
+        assertEquals(listOf("", "", "Build Mac"), CompanionProtocol.projects(roster).map { it.deviceAlias })
+    }
+
     @Test fun savedMachinesRetainTheirNamesIdentitiesAndPairingTokensAfterReload() {
         val machines = listOf(
             PairedMachine("first", "wss://first.example/?t=a%2Bb", "Work \"Mac\"", "mac-first"),
