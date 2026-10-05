@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -275,7 +274,6 @@ private fun SessionList(state: HomeState, client: CompanionClient, modifier: Mod
 @Composable
 private fun TerminalPage(state: CompanionState, modifier: Modifier) {
     val terminalState = rememberGhosttyTerminalState()
-    val inputReady = state.sessionReady && terminalState.view != null
     Column(modifier) {
         Text(state.sessionStatus, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -287,11 +285,7 @@ private fun TerminalPage(state: CompanionState, modifier: Modifier) {
             focusOnAttach = true,
             darkColorScheme = true,
         )
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            GhosttyExtraKeysBar(state = terminalState, modifier = Modifier.weight(1f))
-            Button(onClick = { terminalState.view?.sendKey(KeyEvent.KEYCODE_ENTER) },
-                enabled = inputReady, modifier = Modifier.padding(horizontal = 8.dp)) { Text("Enter") }
-        }
+        GhosttyExtraKeysBar(state = terminalState, modifier = Modifier.fillMaxWidth())
     }
     GhosttyDialogs(terminalState)
 }

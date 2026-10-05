@@ -1,0 +1,14 @@
+diff --git a/io/github/sagernet/libghostty/GhosttyTerminalView.kt b/io/github/sagernet/libghostty/GhosttyTerminalView.kt
+--- a/io/github/sagernet/libghostty/GhosttyTerminalView.kt
++++ b/io/github/sagernet/libghostty/GhosttyTerminalView.kt
+@@ -1712,8 +1712,7 @@
+     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+-        // IMEs send each keystroke of a visible-password field as it is typed
+-        // instead of batching autocorrect, and still compose CJK input.
++        // Password fields disable Gboard dictation. Suppress suggestions
++        // without classifying every terminal prompt as a password.
+         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
+-            InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
+             EditorInfo.IME_FLAG_NO_FULLSCREEN or

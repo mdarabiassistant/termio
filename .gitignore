@@ -35,6 +35,7 @@ android/.gradle/
 android/.idea/
 android/build/
 android/app/build/
+android/ghostty/build/
 android/local.properties
 /.android-release-signing/
 

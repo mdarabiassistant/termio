@@ -1,0 +1,75 @@
+plugins {
+    id 'com.android.library'
+}
+
+// Keep the upstream native binaries and resources; rebuild only its Kotlin
+// bindings with the input fix until the dependency exposes a non-password mode.
+// Upstream: https://github.com/SagerNet/libghostty-android (MIT).
+configurations {
+    upstreamSources { transitive = false }
+    upstreamArchive { transitive = false }
+}
+
+dependencies {
+    upstreamSources 'io.github.sagernet:libghostty-android:0.1.0-alpha01:sources@jar'
+    upstreamArchive 'io.github.sagernet:libghostty-android:0.1.0-alpha01@aar'
+    api 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2'
+}
+
+def upstreamDirectory = layout.buildDirectory.dir('upstream')
+def inputPatch = layout.projectDirectory.file('voice-input.patch')
+
+def prepareGhostty = tasks.register('prepareGhostty') {
+    inputs.files(configurations.upstreamSources, configurations.upstreamArchive)
+    inputs.file(inputPatch)
+    outputs.dir(upstreamDirectory)
+
+    doLast {
+        def destination = upstreamDirectory.get().asFile
+        delete destination
+        copy {
+            from zipTree(configurations.upstreamSources.singleFile)
+            include '**/*.kt'
+            into new File(destination, 'sources')
+        }
+        copy {
+            from zipTree(configurations.upstreamArchive.singleFile)
+            include 'AndroidManifest.xml', 'res/**', 'jni/**', 'proguard.txt'
+            into new File(destination, 'archive')
+        }
+        // Applying a checked-in patch fails the build if upstream changes the
+        // affected code, instead of silently restoring the password input type.
+        providers.exec {
+            workingDir rootProject.projectDir.parentFile
+            commandLine 'git', 'apply',
+                "--directory=${rootProject.projectDir.parentFile.toPath().relativize(new File(destination, 'sources').toPath())}",
+                inputPatch.asFile.absolutePath
+        }.result.get().assertNormalExitValue()
+    }
+}
+
+android {
+    namespace 'io.github.sagernet.libghostty'
+    compileSdk 37
+
+    defaultConfig {
+        minSdk 26
+        consumerProguardFiles upstreamDirectory.get().file('archive/proguard.txt').asFile
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            kotlin.directories.add(upstreamDirectory.get().dir('sources').asFile.absolutePath)
+            manifest.srcFile upstreamDirectory.get().file('archive/AndroidManifest.xml').asFile
+            res.srcDir upstreamDirectory.get().dir('archive/res').asFile
+            jniLibs.srcDir upstreamDirectory.get().dir('archive/jni').asFile
+        }
+    }
+}
+
+tasks.named('preBuild').configure { dependsOn prepareGhostty }
