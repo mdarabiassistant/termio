@@ -112,6 +112,9 @@ private fun TermioApp(client: CompanionClient) {
                 },
                 actions = {
                     if (!inTerminal && state.machines.isNotEmpty() && !state.showingPairing) {
+                        TextButton(onClick = client::refreshSessions, enabled = !state.refreshingSessions) {
+                            Text(if (state.refreshingSessions) "Refreshing…" else "Refresh")
+                        }
                         TextButton(onClick = client::beginPairing) { Text("Add Mac") }
                     }
                 },
@@ -233,7 +236,8 @@ private fun SessionList(state: HomeState, client: CompanionClient, modifier: Mod
                 } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(connection.status, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.weight(1f))
-                    if (connection.connected) Button(onClick = { client.startTerminal(machine.id) }) { Text("New Terminal") }
+                    if (connection.connected) Button(onClick = { client.startTerminal(machine.id) },
+                        enabled = !connection.loadingRoster) { Text("New Terminal") }
                 }
             }
             if (connection.connected && connection.error.isEmpty()) {
