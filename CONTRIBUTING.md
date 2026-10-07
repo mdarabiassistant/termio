@@ -126,8 +126,31 @@ profile and site origin; the app does not upload them to the website host. The
 host serves the static page and can log ordinary page requests. The app contains
 no analytics or third-party runtime scripts.
 
-For automatic deployment with Cloudflare Pages, connect this GitHub repository
-and use these build settings:
+For automatic deployment with Cloudflare Workers Builds, connect this GitHub
+repository and run commands from the repository root:
+
+| Setting | Value |
+| --- | --- |
+| Production branch | `main` |
+| Build command | `npm --prefix web/companion ci && npm --prefix web/companion run build` |
+| Deploy command | `npx wrangler@4.148.0 deploy` |
+| Preview command | `npx wrangler@4.148.0 preview` |
+| Build environment variable | `NODE_VERSION=22` |
+
+The root `wrangler.jsonc` targets the `termio` Worker and uploads only
+`web/companion/dist`. It serves static assets without a Worker script. Its empty
+`previews` block enables branch previews; assets and compatibility settings stay
+at the top level. Enable preview builds to get a preview URL for PR branches.
+Merges to `main` use the deploy command to update production. For build watch
+paths, include `web/companion/*`, `web/landing/public/logo.png`, and
+`wrangler.jsonc`. Add the custom domain in the Worker dashboard.
+
+GitHub validation also runs a Wrangler deployment dry run, which checks the
+configuration and asset directory without publishing or requiring credentials.
+See [Workers Builds settings](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
+and [preview configuration](https://developers.cloudflare.com/workers/previews/configuration/).
+
+For Cloudflare Pages, connect this GitHub repository and use these build settings:
 
 | Setting | Value |
 | --- | --- |
