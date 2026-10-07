@@ -92,13 +92,15 @@ async function pair(page: Page, url = address, remember = false): Promise<void> 
   await expect(page.getByRole('dialog')).not.toBeVisible();
 }
 async function terminalText(page: Page): Promise<string> {
-  return page.locator('.xterm-accessibility-tree').innerText();
+  const accessible = page.locator('.xterm-accessibility-tree');
+  return (await accessible.count() ? accessible : page.locator('.xterm-rows')).innerText();
 }
-async function openShell(page: Page): Promise<void> {
+async function openShell(page: Page, screenReaderMode = true): Promise<void> {
   await page.goto('./index.html');
-  await page.getByLabel('Screen reader', { exact: true }).check();
   await pair(page);
   await page.getByRole('button', { name: /Local shell/ }).click();
+  if (screenReaderMode) await page.getByLabel('Screen reader', { exact: true }).check();
+  await page.locator('.xterm-helper-textarea').focus();
   await expect.poll(() => terminalText(page)).toContain('shell ready');
 }
 
@@ -307,4 +309,137 @@ test('uses the app logo and retracts the sidebar without interrupting the termin
   // The terminal paints on the next frame after the server's grid update.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.screenshot({ path: testInfo.outputPath('sidebar-collapsed-narrow.png') });
+});
+
+
+test('keeps the touch keyboard out of desktop sessions', async ({ page }) => {
+  await openShell(page);
+  await expect(page.locator('#touch-keys')).not.toBeVisible();
+  await expect(page.locator('#toggle-keyboard')).not.toBeVisible();
+  await page.setViewportSize({ width: 600, height: 700 });
+  await expect(page.locator('#touch-keys')).not.toBeVisible();
+});
+
+test.describe('touch keyboard', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  test('sends special keys and one-shot modifiers while keeping terminal focus', async ({ page }, testInfo) => {
+    await openShell(page, false);
+    const bar = page.getByRole('group', { name: 'Terminal keys' });
+    const textarea = page.locator('.xterm-helper-textarea');
+    const key = (name: string) => bar.getByRole('button', { name, exact: true });
+    const received = () => Buffer.concat(inputs.map((input) => input.bytes)).toString();
+    await expect(bar).toBeVisible();
+    await expect(page.locator('#sidebar')).not.toBeVisible();
+    let expected = '';
+    const send = async (name: string, sequence: string) => {
+      await key(name).tap();
+      expected += sequence;
+      await expect.poll(received).toBe(expected);
+      await expect(textarea).toBeFocused();
+    };
+    for (const [name, sequence] of [
+      ['Escape', '\x1b'], ['Tab', '\t'], ['Arrow Left', '\x1b[D'], ['Arrow Down', '\x1b[B'],
+      ['Arrow Up', '\x1b[A'], ['Arrow Right', '\x1b[C'], ['Home', '\x1b[H'], ['End', '\x1b[F'],
+      ['Page Up', '\x1b[5~'], ['Page Down', '\x1b[6~'],
+    ]) await send(name, sequence);
+    await key('Control').tap();
+    await expect(key('Control')).toHaveAttribute('aria-pressed', 'true');
+    await page.keyboard.insertText('c');
+    expected += '\x03';
+    await expect.poll(received).toBe(expected);
+    await expect(key('Control')).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.insertText('c');
+    expected += 'c';
+    await expect.poll(received).toBe(expected);
+    await key('Alt').tap();
+    await page.keyboard.insertText('b');
+    expected += '\x1bb';
+    await expect.poll(received).toBe(expected);
+    await expect(key('Alt')).toHaveAttribute('aria-pressed', 'false');
+    await key('Control').tap();
+    await send('Arrow Left', '\x1b[1;5D');
+    await key('Alt').tap();
+    await key('Control').tap();
+    await send('Arrow Right', '\x1b[1;7C');
+    await key('Control').tap();
+    await page.keyboard.insertText('ß');
+    expected += 'ß';
+    await expect.poll(received).toBe(expected);
+    await key('Control').tap();
+    await page.keyboard.insertText('日本語');
+    expected += '日本語';
+    await expect.poll(received).toBe(expected);
+    await expect(key('Control')).toHaveAttribute('aria-pressed', 'false');
+    sessionSockets.get('shell')?.send(Buffer.from('\x1b[?1h\r\napplication mode\r\n'));
+    await expect.poll(() => terminalText(page)).toContain('application mode');
+    await send('Arrow Up', '\x1bOA');
+    await send('Home', '\x1bOH');
+    await key('Tab').focus();
+    await key('Tab').press('Enter');
+    expected += '\t';
+    await expect.poll(received).toBe(expected);
+    await expect(textarea).toBeFocused();
+    await key('Control').tap();
+    await page.screenshot({ path: testInfo.outputPath('phone-keys.png') });
+    await page.getByRole('button', { name: 'Hide Keyboard', exact: true }).tap();
+    await expect(bar).not.toBeVisible();
+    await expect(textarea).not.toBeFocused();
+    await page.getByRole('button', { name: 'Show Keyboard', exact: true }).tap();
+    await expect(bar).toBeVisible();
+    await expect(key('Control')).toHaveAttribute('aria-pressed', 'false');
+    await expect(textarea).toBeFocused();
+    sessionSockets.get('shell')?.send(JSON.stringify({ t: 'exit', code: 0 }));
+    await expect(page.locator('#session-status')).toHaveText('Ended (0)');
+    await expect(bar).not.toBeVisible();
+    await expect(page.locator('#toggle-keyboard')).not.toBeVisible();
+    expect(inputs.every((input) => input.session === 'shell')).toBe(true);
+  });
+
+  test('fits tablet keyboard viewport changes and clears keys across sessions', async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 820, height: 1180 });
+    await page.addInitScript(() => {
+      const viewport = new EventTarget();
+      Object.assign(viewport, { height: 1180, offsetTop: 0, scale: 1 });
+      Object.defineProperty(window, 'visualViewport', { value: viewport });
+    });
+    followViewport = true;
+    await openShell(page, false);
+    const bar = page.getByRole('group', { name: 'Terminal keys' });
+    const control = bar.getByRole('button', { name: 'Control', exact: true });
+    await expect(bar).toBeVisible();
+    await expect(page.locator('#sidebar')).toBeVisible();
+    const previousRows = controls.filter((entry) => entry.message.t === 'resize').at(-1)?.message.rows;
+    await page.evaluate(() => {
+      Object.assign(window.visualViewport!, { height: 470, offsetTop: 30 });
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+      window.visualViewport!.dispatchEvent(new Event('scroll'));
+    });
+    await expect.poll(() => page.locator('#app').evaluate((app) => app.getBoundingClientRect().bottom)).toBe(500);
+    await expect.poll(() => Number(controls.filter((entry) => entry.message.t === 'resize').at(-1)?.message.rows)).toBeLessThan(Number(previousRows));
+    for (const button of await bar.getByRole('button').all()) {
+      const box = await button.boundingBox();
+      expect(box && box.x >= 0 && box.x + box.width <= 820 && box.y >= 30 && box.y + box.height <= 500).toBe(true);
+      expect(box && box.width >= 44 && box.height >= 44).toBe(true);
+    }
+    await page.screenshot({ path: testInfo.outputPath('tablet-keyboard-viewport.png') });
+    await page.setViewportSize({ width: 1180, height: 820 });
+    await expect.poll(() => bar.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(70);
+    await page.screenshot({ path: testInfo.outputPath('tablet-landscape-keys.png') });
+    await control.tap();
+    await page.getByRole('button', { name: /Deployment logs/ }).tap();
+    await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
+    await expect(control).toHaveAttribute('aria-pressed', 'false');
+    await bar.getByRole('button', { name: 'Tab', exact: true }).tap();
+    await expect.poll(() => inputs.at(-1)?.session).toBe('remote-shell');
+    await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
+    await page.evaluate(() => {
+      Object.assign(window.visualViewport!, { scale: 2 });
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+    });
+    await expect(page.locator('#app')).not.toHaveClass(/touch-typing/);
+    await page.getByRole('button', { name: 'Detach', exact: true }).tap();
+    await expect(bar).not.toBeVisible();
+    await expect(page.locator('#toggle-keyboard')).not.toBeVisible();
+  });
 });
