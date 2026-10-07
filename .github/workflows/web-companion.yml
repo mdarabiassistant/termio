@@ -3,7 +3,7 @@ name: Web Companion
 on:
   push:
     branches: [main]
-    paths: ["web/companion/**", "web/landing/public/logo.png", ".github/workflows/web-companion.yml"]
+    paths: ["web/companion/**", "web/landing/public/logo.png", "wrangler.jsonc", ".github/workflows/web-companion.yml"]
   pull_request:
 
 permissions:
@@ -33,3 +33,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - name: Validate Cloudflare deployment
+        working-directory: .
+        env:
+          CLOUDFLARE_SEND_METRICS: "false"
+        run: npx --yes wrangler@4.148.0 deploy --dry-run
