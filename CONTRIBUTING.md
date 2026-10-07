@@ -93,7 +93,8 @@ groups sessions by machine; select a session to use its terminal on the right.
 **Remember on this browser** is checked; remembered addresses include the pairing
 token. Browser storage for local files may change if the HTML file is moved.
 
-To rebuild the file from source, use Node.js 22 or later:
+To rebuild the file from source, use Node.js 22, as specified in
+`web/companion/.node-version`:
 
 ```sh
 cd web/companion
@@ -124,6 +125,36 @@ their own address and pairing token. Saved connections belong to that browser
 profile and site origin; the app does not upload them to the website host. The
 host serves the static page and can log ordinary page requests. The app contains
 no analytics or third-party runtime scripts.
+
+For automatic deployment with Cloudflare Pages, connect this GitHub repository
+and use these build settings:
+
+| Setting | Value |
+| --- | --- |
+| Production branch | `main` |
+| Framework preset | None |
+| Root directory | `web/companion` |
+| Build command | `npm ci && npm run build` |
+| Build output directory | `dist` |
+
+Pages reads the Node.js version from `.node-version`. Enable automatic
+production deployments and add your custom domain in the Pages dashboard.
+For build watch paths, include `web/companion/*` and
+`web/landing/public/logo.png`; the logo is embedded from outside the companion
+folder. A merge into `main` then triggers a new build and deployment. Build
+output stays out of Git, and no GitHub Release or deployment token is needed
+for this Git integration.
+
+The `Web companion validation` check builds and tests the companion on every PR.
+Require this check in the `main` branch rules before enabling automatic
+production deployments; Cloudflare starts builds from pushes independently of
+GitHub Actions. The workflow runs on every PR so unrelated changes also report
+a result instead of leaving a required check pending.
+
+A Pages project created with Direct Upload cannot switch to Git integration.
+Create a Git-connected Pages project to use this deployment flow. See the
+[Cloudflare Git integration guide](https://developers.cloudflare.com/pages/configuration/git-integration/)
+and [build settings](https://developers.cloudflare.com/pages/configuration/build-configuration/).
 
 ## Code conventions
 
