@@ -79,6 +79,52 @@ your clone — `ios/Signing.xcconfig` gives the exact path and format. Keeping i
 outside the repo means nothing local ever lands in git, and one copy covers
 every clone and worktree.
 
+### Web companion
+
+The browser companion is a standalone HTML file. Open `web/companion/dist/index.html`
+directly in a browser, choose **Add Machine**, and paste the connection address
+from the Mac's **Settings → Mobile**. It needs no web server, hosting, or Node.js
+to run. Termio must be running on the Mac with Mobile Access enabled; the page
+connects directly to its existing WebSocket service.
+
+Turn off **Direct Attach** to get a `ws://` or `wss://` address. The left pane
+groups sessions by machine; select a session to use its terminal on the right.
+**Detach** leaves the session running. Connections stay in memory unless
+**Remember on this browser** is checked; remembered addresses include the pairing
+token. Browser storage for local files may change if the HTML file is moved.
+
+To rebuild the file from source, use Node.js 22 or later:
+
+```sh
+cd web/companion
+npm ci
+npm run build                  # one self-contained file: dist/index.html
+```
+
+The build embeds xterm.js, application code, and styles. Copy `index.html`
+anywhere and open it; there are no companion assets or CDN dependencies.
+For development and verification:
+
+```sh
+npm run dev                    # optional development server with live reload
+npx playwright install chromium
+npm test                       # opens the built HTML via file://
+```
+
+The browser tests use a WebSocket fixture for the Mac and no HTTP server.
+The browser must be able to reach the Mac or its tunnel. This client uses
+companion wire v2; it does not speak the separate Direct Attach protocol.
+For public static hosting, upload only `dist/index.html` at the site root. The
+published artifact contains no saved connections, screenshots, test fixtures,
+local environment files, or source maps. Keep the checkout,
+`node_modules`, and test results out of the hosting directory.
+
+An HTTPS page requires a reachable `wss://` Mobile address. Each visitor supplies
+their own address and pairing token. Saved connections belong to that browser
+profile and site origin; the app does not upload them to the website host. The
+host serves the static page and can log ordinary page requests. The app contains
+no analytics or third-party runtime scripts.
+
 ## Code conventions
 
 From `AGENTS.md` (the authoritative copy, also what AI coding agents read):

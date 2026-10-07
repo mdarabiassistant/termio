@@ -1,0 +1,34 @@
+name: Web Companion
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/companion/**", "web/landing/public/logo.png", ".github/workflows/web-companion.yml"]
+  pull_request:
+    paths: ["web/companion/**", "web/landing/public/logo.png", ".github/workflows/web-companion.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-companion-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/companion
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/companion/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
