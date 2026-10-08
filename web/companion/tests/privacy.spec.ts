@@ -84,8 +84,8 @@ test('HTTPS hosting keeps pairings per browser and sends no visitor data to the 
     expect(await second.cookies()).toEqual([]);
     expect(socketURLs).toEqual([machineEndpoint, machineEndpoint]);
     expect(authentication).toEqual([
-      { t: 'auth', token: syntheticToken, wire: 2 },
-      { t: 'auth', token: syntheticToken, wire: 2 },
+      { t: 'auth', token: syntheticToken, wire: 3 },
+      { t: 'auth', token: syntheticToken, wire: 3 },
     ]);
     expect(httpRequests).toEqual(Array.from({ length: 3 }, () => ({ url: site, method: 'GET', body: null })));
     expect(browserErrors).toEqual([]);

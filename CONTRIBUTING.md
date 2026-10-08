@@ -93,6 +93,12 @@ groups sessions by machine; select a session to use its terminal on the right.
 **Remember on this browser** is checked; remembered addresses include the pairing
 token. Browser storage for local files may change if the HTML file is moved.
 
+**New Terminal** asks for a session name, prefilled with **New Session**. Use the
+rename button beside an existing session to change its name. Both actions use
+the companion’s `renameSession` request and the daemon’s persistent custom name;
+the dialog waits for the session’s machine to confirm the change. A failed
+confirmation keeps the edit queued, and retrying names the same session.
+
 On phones and tablets, focus the terminal or tap **Keyboard** to show Esc, Tab,
 Ctrl, Alt, arrows, Home, End, and Page Up/Down. Ctrl and Alt apply to the next
 key; tap a selected modifier again to cancel it. Tap **Keyboard** again to
@@ -120,7 +126,8 @@ npm test                       # opens the built HTML via file://
 
 The browser tests use a WebSocket fixture for the Mac and no HTTP server.
 The browser must be able to reach the Mac or its tunnel. This client uses
-companion wire v2; it does not speak the separate Direct Attach protocol.
+companion wire v3 with v2 roster compatibility; naming requires a v3 Mac.
+It does not speak the separate Direct Attach protocol.
 For public static hosting, upload only `dist/index.html` at the site root. The
 published artifact contains no saved connections, screenshots, test fixtures,
 local environment files, or source maps. Keep the checkout,

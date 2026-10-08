@@ -1,9 +1,9 @@
-export const wireVersion = 2;
+export const wireVersion = 3;
 
 export interface PairingAddress { url: string; token: string; endpoint: string; host: string }
 export interface Session { id: string; title: string; agent: string; status: string; subtitle: string }
 export interface Project { id: string; workspaceID: string; deviceAlias: string; sessions: Session[] }
-export interface Roster { macID: string; macName: string; projects: Project[] }
+export interface Roster { wire: number; macID: string; macName: string; projects: Project[] }
 export type Control = Record<string, unknown> & { t: string };
 
 export function pairingAddress(raw: string, pageProtocol = location.protocol): PairingAddress {
@@ -43,10 +43,11 @@ const records = (value: unknown): Record<string, unknown>[] => Array.isArray(val
   ? value.filter((item) => item && typeof item === 'object') : [];
 
 export function parseRoster(message: Control): Roster {
-  if (typeof message.wire !== 'number' || message.wire < wireVersion) {
+  if (typeof message.wire !== 'number' || message.wire < 2) {
     throw new Error('Update Termio on your Mac to connect this browser.');
   }
   return {
+    wire: message.wire,
     macID: string(message.macID), macName: string(message.macName),
     projects: records(message.projects).filter((project) => string(project.id)).map((project) => ({
       id: string(project.id), workspaceID: string(project.workspaceID), deviceAlias: string(project.deviceAlias),

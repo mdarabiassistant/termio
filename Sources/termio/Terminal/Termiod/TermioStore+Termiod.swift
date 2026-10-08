@@ -1242,9 +1242,30 @@ extension TermioStore {
         }
     }
 
-    func setSessionName(_ name: String?, for id: Session.ID) {
+    func setSessionName(
+        _ name: String?, for id: Session.ID,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard session(id) != nil else {
+            completion?(.failure(TermiodClientError.requestFailed("The session is no longer available.")))
+            return
+        }
+        sessionNameCompletions.removeValue(forKey: id)?.complete(.failure(
+            TermiodClientError.requestFailed("The session name changed again. Check the session list.")))
         updateSession(id) { $0.chooseName(name) }
+        if let completion, let pending = session(id)?.pendingName {
+            sessionNameCompletions[id] = (pending.token, completion)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                self?.completeSessionNameUpload(for: id, token: pending.token, result: .failure(
+                    TermiodClientError.requestFailed("The machine didn’t confirm the name. Check the session list before trying again.")))
+            }
+        }
         uploadSessionName(for: id)
+    }
+
+    private func completeSessionNameUpload(for id: Session.ID, token: UUID, result: Result<Void, Error>) {
+        guard sessionNameCompletions[id]?.token == token else { return }
+        sessionNameCompletions.removeValue(forKey: id)?.complete(result)
     }
 
     /// One request at a time per row keeps rapid edits ordered. Failed writes
@@ -1255,23 +1276,35 @@ extension TermioStore {
               sessionNameUploads.insert(id).inserted else { return }
         let route = TermiodRoute(sshAlias: session.termiodRemoteHost)
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result: Termiod.SessionInformation?
+            let result: Result<Termiod.SessionInformation, Error>
             do {
-                result = try Termiod.setSessionName(
-                    target: daemonID, name: pending.value, ifUnset: pending.ifUnset, route: route)
+                guard let information = try Termiod.setSessionName(
+                    target: daemonID, name: pending.value, ifUnset: pending.ifUnset, route: route) else {
+                    throw TermiodClientError.requestFailed("Update Termio on the session’s machine to sync its name.")
+                }
+                result = .success(information)
             } catch {
                 Log.termiod.error("Session name upload failed: \(error.localizedDescription)")
-                result = nil
+                result = .failure(error)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.sessionNameUploads.remove(id)
-                guard let current = self.session(id), current.termiodDaemonID == daemonID else { return }
-                guard let result else { return }
+                guard let current = self.session(id), current.termiodDaemonID == daemonID else {
+                    self.completeSessionNameUpload(for: id, token: pending.token, result: .failure(
+                        TermiodClientError.requestFailed("The session is no longer available.")))
+                    return
+                }
                 if current.pendingName?.token == pending.token {
-                    self.updateSession(id) {
-                        $0.pendingName = nil
-                        $0.acceptDaemonName(result)
+                    switch result {
+                    case .success(let information):
+                        self.updateSession(id) {
+                            $0.pendingName = nil
+                            $0.acceptDaemonName(information)
+                        }
+                        self.completeSessionNameUpload(for: id, token: pending.token, result: .success(()))
+                    case .failure(let error):
+                        self.completeSessionNameUpload(for: id, token: pending.token, result: .failure(error))
                     }
                 } else {
                     self.uploadSessionName(for: id)

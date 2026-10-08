@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type Locator } from '@playwright/test';
 import { copyFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,20 +26,32 @@ let macID: string;
 let macName: string;
 let refuse = false;
 let followViewport = false;
+let confirmRenames = true;
+let serverWire = 3;
+let socketEndpoints: Map<WebSocket, string>;
+let socketProjects: Map<WebSocket, typeof projects>;
+let sessionNames: Map<string, Map<string, string>>;
 
 function roster(socket: WebSocket, rows = projects): void {
-  socket.send(JSON.stringify({ t: 'roster', wire: 2, macID, macName, projects: rows }));
+  socketProjects.set(socket, rows);
+  const names = sessionNames.get(socketEndpoints.get(socket) ?? '');
+  socket.send(JSON.stringify({ t: 'roster', wire: serverWire, macID, macName, projects: rows.map((project) => ({
+    ...project, sessions: project.sessions.map((session) => ({ ...session, title: names?.get(session.id) ?? session.title })),
+  })) }));
 }
 
 test.beforeEach(async () => {
   rosterSockets = new Set(); sessionSockets = new Map(); controls = []; inputs = []; handshakes = [];
   macID = 'fixture-mac'; macName = 'Studio Mac'; refuse = false; followViewport = false;
+  confirmRenames = true; serverWire = 3;
+  socketEndpoints = new Map(); socketProjects = new Map(); sessionNames = new Map();
   server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const binding = server.address();
   if (!binding || typeof binding === 'string') throw new Error('Missing fixture port');
   address = `ws://127.0.0.1:${binding.port}/?t=test-pairing-token`;
   server.on('connection', (socket, request) => {
+    socketEndpoints.set(socket, request.url ?? '');
     handshakes.push(request.url ?? '');
     let authenticated = false;
     let session = '';
@@ -53,7 +65,7 @@ test.beforeEach(async () => {
       const message = JSON.parse(data.toString());
       controls.push({ socket, message });
       if (!authenticated) {
-        expect(message).toEqual({ t: 'auth', token: 'test-pairing-token', wire: 2 });
+        expect(message).toEqual({ t: 'auth', token: 'test-pairing-token', wire: 3 });
         if (refuse) {
           socket.send(JSON.stringify({ t: 'error', code: 'unauthorized' }));
           socket.close();
@@ -73,6 +85,16 @@ test.beforeEach(async () => {
         socket.send(text.subarray(12));
       } else if (message.t === 'resize' && followViewport) {
         socket.send(JSON.stringify({ t: 'grid', cols: message.cols, rows: message.rows, writer: true }));
+      } else if (message.t === 'renameSession' && confirmRenames) {
+        const endpoint = socketEndpoints.get(socket) ?? '';
+        const names = sessionNames.get(endpoint) ?? new Map<string, string>();
+        names.set(message.session, message.name);
+        sessionNames.set(endpoint, names);
+        socket.send(JSON.stringify({ t: 'sessionRenamed', session: message.session, name: message.name, request: message.request }));
+        for (const viewer of rosterSockets) {
+          const rows = socketProjects.get(viewer);
+          if (socketEndpoints.get(viewer) === endpoint && rows?.some((project) => project.sessions.some((session) => session.id === message.session))) roster(viewer, rows);
+        }
       }
     });
     socket.on('close', () => { rosterSockets.delete(socket); });
@@ -102,6 +124,14 @@ async function openShell(page: Page, screenReaderMode = true): Promise<void> {
   if (screenReaderMode) await page.getByLabel('Screen reader', { exact: true }).check();
   await page.locator('.xterm-helper-textarea').focus();
   await expect.poll(() => terminalText(page)).toContain('shell ready');
+}
+
+async function requestTerminal(page: Page, scope: Page | Locator = page, name = 'New Session'): Promise<void> {
+  if (!await page.locator('#session-name-dialog').isVisible()) {
+    await scope.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  }
+  await page.getByLabel('Session name', { exact: true }).fill(name);
+  await page.getByRole('button', { name: /Create Session|Rename/, exact: true }).last().click();
 }
 
 test('pairing validation and roster grouping preserve the companion contract', () => {
@@ -207,9 +237,9 @@ test('supports multiple Macs, opt-in persistence, and confirmed forgetting', asy
 test('creates and opens a terminal with the Android workspace hint', async ({ page }, testInfo) => {
   await openShell(page);
   const oldSocket = sessionSockets.get('shell');
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Opening…', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Opening…', exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  await requestTerminal(page, page, 'New shell');
+  await expect(page.locator('.new-terminal')).toBeDisabled();
+  await page.locator('.new-terminal').evaluate((button: HTMLButtonElement) => button.click());
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   const request = controls.find((entry) => entry.message.t === 'startTerminal');
   expect(request?.message).toEqual({ t: 'startTerminal', workspace: 'local-workspace' });
@@ -241,15 +271,15 @@ test('creates the first terminal without a workspace and opens it before the ros
   await expect(page.getByText('Choose New Terminal to start a session on your Mac.')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('new-terminal-empty.png') });
   await page.getByLabel('Screen reader', { exact: true }).check();
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   const request = controls.find((entry) => entry.message.t === 'startTerminal');
   expect(request?.message).toEqual({ t: 'startTerminal' });
   request!.socket.send(JSON.stringify({ t: 'started', session: 'first-terminal', agent: 'terminal' }));
   await expect.poll(() => terminalText(page)).toContain('first-terminal ready');
-  await expect(page.locator('#session-title')).toHaveText('Terminal');
+  await expect(page.locator('#session-title')).toHaveText('New Session');
   roster(request!.socket, [{ ...projects[0], sessions: [{ id: 'first-terminal', title: 'First shell', agent: 'terminal', status: 'idle' }] }]);
-  await expect(page.locator('#session-title')).toHaveText('First shell');
+  await expect(page.locator('#session-title')).toHaveText('New Session');
   await expect(page.locator('#session-status')).toHaveText('Connected');
   await page.screenshot({ path: testInfo.outputPath('new-terminal-narrow.png') });
 });
@@ -257,19 +287,19 @@ test('creates the first terminal without a workspace and opens it before the ros
 test('shows creation failures and lets the user retry without dropping the current session', async ({ page }) => {
   await openShell(page);
   const currentSocket = sessionSockets.get('shell');
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
   socket.send(JSON.stringify({ t: 'error', message: 'Couldn’t open a terminal.' }));
-  await expect(page.getByRole('alert')).toContainText('Couldn’t open a terminal.');
+  await expect(page.locator('#session-name-error')).toContainText('Couldn’t open a terminal.');
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
   await expect(page.locator('#session-title')).toHaveText('Local shell');
   expect(currentSocket?.readyState).toBe(WebSocket.OPEN);
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(2);
-  await expect(page.getByRole('alert')).not.toBeVisible();
+  await expect(page.locator('#session-name-error')).not.toBeVisible();
   socket.send(JSON.stringify({ t: 'started', session: '' }));
-  await expect(page.getByRole('alert')).toContainText('The Mac didn’t return a session.');
+  await expect(page.locator('#session-name-error')).toContainText('The Mac didn’t return a session.');
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
   expect(sessionSockets.size).toBe(1);
 });
@@ -277,12 +307,13 @@ test('shows creation failures and lets the user retry without dropping the curre
 test('clears a pending creation on connection loss without replaying the request', async ({ page }) => {
   await page.goto('./index.html');
   await pair(page);
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   controls.find((entry) => entry.message.t === 'startTerminal')!.socket.terminate();
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
   expect(controls.filter((entry) => entry.message.t === 'startTerminal')).toHaveLength(1);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeDisabled();
 });
@@ -291,10 +322,10 @@ test('times out a creation without replaying it or opening a late reply', async 
   await page.clock.install();
   await page.goto('./index.html');
   await pair(page);
-  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   await page.clock.fastForward(15001);
-  await expect(page.getByRole('alert')).toContainText('Check the session list before trying again.');
+  await expect(page.locator('#session-name-error')).toContainText('Check the session list before trying again.');
   await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
   const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
   socket.send(JSON.stringify({ t: 'started', session: 'late-terminal' }));
@@ -311,15 +342,15 @@ test('creates on the chosen Mac and respects a later session selection', async (
   macID = 'second-mac'; macName = 'Laptop';
   await pair(page, address.replace('/?', '/second?'));
   const laptop = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Laptop', exact: true }) });
-  await laptop.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page, laptop);
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
   const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
   socket.send(JSON.stringify({ t: 'started', session: 'laptop-terminal' }));
   await expect.poll(() => terminalText(page)).toContain('laptop-terminal ready');
   await expect(page.locator('#session-context')).toHaveText('Laptop / This machine');
-  await laptop.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await requestTerminal(page, laptop, 'Background shell');
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(2);
-  await laptop.getByRole('button', { name: /Deployment logs/ }).click();
+  await laptop.getByRole('button', { name: /Deployment logs/ }).evaluate((button: HTMLButtonElement) => button.click());
   await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
   socket.send(JSON.stringify({ t: 'started', session: 'background-terminal' }));
   roster(socket, [{ ...projects[0], sessions: [{ id: 'background-terminal', title: 'Background shell', agent: 'terminal', status: 'idle' }] }, projects[1]]);
@@ -341,6 +372,173 @@ test('shows rejected tokens without a retry loop and validates Direct Attach lin
   await expect(page.getByText('Disconnected', { exact: true })).toBeVisible();
   expect(controls).toHaveLength(1);
   expect(await page.evaluate(() => localStorage.getItem('termio.web.machines.v1'))).toBe('[]');
+});
+
+test('session naming prompts with the selected default and cancels without creating anything', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 740 });
+  await page.goto('./index.html');
+  await pair(page);
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  const field = page.getByLabel('Session name', { exact: true });
+  await expect(field).toHaveValue('New Session');
+  await expect(field).toBeFocused();
+  expect(await field.evaluate((input: HTMLInputElement) => [input.selectionStart, input.selectionEnd])).toEqual([0, 11]);
+  const dialog = page.locator('#session-name-dialog');
+  const bounds = await dialog.boundingBox();
+  expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('session-name-mobile.png') });
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await field.fill('   ');
+  await page.getByRole('button', { name: 'Create Session', exact: true }).click();
+  await expect(page.locator('#session-name-error')).toHaveText('Enter a session name.');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(controls.filter((entry) => ['startTerminal', 'renameSession'].includes(String(entry.message.t)))).toHaveLength(0);
+});
+
+test('names a new session through rename and waits for confirmation before opening it', async ({ page }, testInfo) => {
+  confirmRenames = false;
+  await openShell(page);
+  const existingSocket = sessionSockets.get('shell');
+  const name = 'Release "λ" 日本語 <script> & logs';
+  await requestTerminal(page, page, `  ${name}  `);
+  const started = controls.find((entry) => entry.message.t === 'startTerminal')!;
+  started.socket.send(JSON.stringify({ t: 'started', session: 'named-terminal', agent: 'terminal' }));
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
+  const rename = controls.find((entry) => entry.message.t === 'renameSession')!;
+  expect(rename.socket).toBe(started.socket);
+  expect(rename.message).toMatchObject({ session: 'named-terminal', name });
+  expect(rosterSockets.has(rename.socket)).toBe(true);
+  expect(existingSocket?.readyState).toBe(WebSocket.OPEN);
+  expect(sessionSockets.has('named-terminal')).toBe(false);
+  await expect(page.locator('#save-session-name')).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#session-name-dialog')).toBeVisible();
+  roster(rename.socket, [{ ...projects[0], sessions: [...projects[0].sessions, { id: 'named-terminal', title: name, agent: 'terminal', status: 'idle' }] }]);
+  rename.socket.send(JSON.stringify({ t: 'sessionRenamed', session: 'named-terminal', name, request: rename.message.request }));
+  await expect(page.locator('#session-name-dialog')).not.toBeVisible();
+  await expect(page.locator('#session-title')).toHaveText(name);
+  await expect.poll(() => terminalText(page)).toContain('named-terminal ready');
+  expect(controls.filter((entry) => entry.message.t === 'startTerminal')).toHaveLength(1);
+  await page.screenshot({ path: testInfo.outputPath('named-session-desktop.png') });
+});
+
+test('renames an existing remote session without replacing its terminal and receives later name updates', async ({ page }) => {
+  await openShell(page);
+  await page.getByRole('button', { name: /Deployment logs/ }).click();
+  await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
+  const attached = sessionSockets.get('remote-shell');
+  await page.getByRole('group', { name: 'Deployment logs', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await expect(page.getByLabel('Session name', { exact: true })).toHaveValue('Deployment logs');
+  await page.getByLabel('Session name', { exact: true }).fill('Remote deployment λ');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect(page.locator('#session-name-dialog')).not.toBeVisible();
+  await expect(page.locator('#session-title')).toHaveText('Remote deployment λ');
+  const request = controls.find((entry) => entry.message.t === 'renameSession')!;
+  expect(request.message).toMatchObject({ session: 'remote-shell', name: 'Remote deployment λ' });
+  expect(rosterSockets.has(request.socket)).toBe(true);
+  expect(sessionSockets.get('remote-shell')).toBe(attached);
+  await page.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('still running');
+  await expect.poll(() => Buffer.concat(inputs.map((input) => input.bytes)).toString()).toBe('still running');
+  expect(controls.some((entry) => ['startTerminal', 'stop'].includes(String(entry.message.t)))).toBe(false);
+  sessionNames.get(socketEndpoints.get(request.socket) ?? '')?.set('remote-shell', 'Renamed on the machine');
+  for (const socket of rosterSockets) roster(socket);
+  await expect(page.locator('#session-title')).toHaveText('Renamed on the machine');
+  await expect(page.getByRole('button', { name: /Renamed on the machine/ })).toBeVisible();
+  expect(sessionSockets.get('remote-shell')).toBe(attached);
+});
+
+test('retries a failed new-session rename on the same session and ignores a superseded reply', async ({ page }) => {
+  confirmRenames = false;
+  await openShell(page);
+  await requestTerminal(page, page, 'New work');
+  const create = controls.find((entry) => entry.message.t === 'startTerminal')!;
+  create.socket.send(JSON.stringify({ t: 'started', session: 'retry-session' }));
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
+  const first = controls.find((entry) => entry.message.t === 'renameSession')!;
+  first.socket.send(JSON.stringify({ ...first.message, t: 'sessionRenamed', error: 'The session’s machine is offline.' }));
+  await expect(page.locator('#session-name-error')).toHaveText('The session’s machine is offline.');
+  await expect(page.getByLabel('Session name', { exact: true })).toHaveValue('New work');
+  await page.getByLabel('Session name', { exact: true }).fill('Retry name');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(2);
+  const second = controls.filter((entry) => entry.message.t === 'renameSession')[1];
+  expect(second.message.session).toBe('retry-session');
+  expect(second.message.request).not.toBe(first.message.request);
+  first.socket.send(JSON.stringify({ ...first.message, t: 'sessionRenamed' }));
+  await expect(page.locator('#session-name-dialog')).toBeVisible();
+  second.socket.send(JSON.stringify({ ...second.message, t: 'sessionRenamed' }));
+  await expect(page.locator('#session-name-dialog')).not.toBeVisible();
+  await expect(page.locator('#session-title')).toHaveText('Retry name');
+  expect(controls.filter((entry) => entry.message.t === 'startTerminal')).toHaveLength(1);
+});
+
+test('times out a rename and ignores its late confirmation without replaying it', async ({ page }) => {
+  confirmRenames = false;
+  await page.clock.install();
+  await openShell(page);
+  const attached = sessionSockets.get('shell');
+  await page.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await page.getByLabel('Session name', { exact: true }).fill('Timed-out name');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
+  await page.clock.fastForward(15001);
+  await expect(page.locator('#session-name-error')).toContainText('The machine didn’t confirm the name.');
+  const request = controls.find((entry) => entry.message.t === 'renameSession')!;
+  request.socket.send(JSON.stringify({ ...request.message, t: 'sessionRenamed' }));
+  await expect(page.locator('#session-name-dialog')).toBeVisible();
+  await expect(page.locator('#session-title')).toHaveText('Local shell');
+  expect(sessionSockets.get('shell')).toBe(attached);
+  expect(controls.filter((entry) => entry.message.t === 'renameSession')).toHaveLength(1);
+});
+
+test('reconnects after a pending rename without replay and keeps the confirmed name across reload', async ({ page }) => {
+  confirmRenames = false;
+  await page.goto('./index.html');
+  await pair(page, address, true);
+  await page.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await page.getByLabel('Session name', { exact: true }).fill('Persistent name');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
+  controls.find((entry) => entry.message.t === 'renameSession')!.socket.terminate();
+  await expect(page.locator('#session-name-error')).toContainText('Connection lost');
+  await expect(page.getByRole('button', { name: 'Rename', exact: true })).toBeEnabled();
+  expect(controls.filter((entry) => entry.message.t === 'renameSession')).toHaveLength(1);
+  confirmRenames = true;
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect(page.locator('#session-name-dialog')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: /Persistent name/ })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: /Persistent name/ })).toBeVisible();
+  expect(controls.filter((entry) => entry.message.t === 'renameSession')).toHaveLength(2);
+});
+
+test('names the session on the chosen Mac without changing an identical session on another Mac', async ({ page }) => {
+  await openShell(page);
+  macID = 'laptop'; macName = 'Laptop';
+  await pair(page, address.replace('/?', '/second?'));
+  const laptop = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Laptop' }) });
+  await laptop.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await page.getByLabel('Session name', { exact: true }).fill('Laptop work');
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect(laptop.getByRole('button', { name: /Laptop work/ })).toBeVisible();
+  const studio = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Studio Mac' }) });
+  await expect(studio.getByRole('button', { name: /Local shell/ })).toBeVisible();
+  const request = controls.find((entry) => entry.message.t === 'renameSession')!;
+  expect(socketEndpoints.get(request.socket)).toBe('/second');
+  await expect(page.locator('#session-title')).toHaveText('Local shell');
+});
+
+test('keeps older Mac sessions usable and explains that naming needs an update', async ({ page }) => {
+  serverWire = 2;
+  await openShell(page);
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Update Termio on this Mac');
+  await expect(page.locator('#session-name-dialog')).not.toBeVisible();
+  await expect(page.locator('#session-status')).toHaveText('Connected');
+  expect(controls.some((entry) => ['startTerminal', 'renameSession'].includes(String(entry.message.t)))).toBe(false);
 });
 
 test('handles an invalid shared grid and fits the two-pane layout on a small screen', async ({ page }, testInfo) => {
