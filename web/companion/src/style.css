@@ -41,6 +41,9 @@ h1 { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; le
 .session-row { display: flex; gap: 10px; align-items: center; width: 100%; padding: 10px 12px 10px 24px; border: 1px solid transparent; background: transparent; text-align: left; margin: 2px 0; }
 .session-row:hover { background: #252a2b; }
 .session-row.selected { background: #2b3731; border-color: #3f5146; }
+.session-item { display: flex; align-items: center; gap: 2px; }
+.session-item .session-row { flex: 1; min-width: 0; width: auto; }
+.rename-session { flex-shrink: 0; font-size: 15px; color: #a5b5ac; }
 .session-label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .session-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
 .session-detail { font-size: 10px; color: #9ca9a2; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -88,13 +91,15 @@ dialog h2 { font-size: 18px; font-weight: 550; margin: 0; letter-spacing: -.25px
 dialog p { color: #a5b0a9; line-height: 1.65; font-size: 12px; margin: 16px 0 21px; }
 .dialog-heading { display: flex; justify-content: space-between; align-items: center; }
 label { display: block; font-size: 12px; margin-bottom: 8px; }
-#pair-address { width: 100%; color: #dce1df; background: #151a17; border: 1px solid #47554c; border-radius: 6px; padding: 11px; font-size: 12px; }
+#pair-address, #session-name { width: 100%; color: #dce1df; background: #151a17; border: 1px solid #47554c; border-radius: 6px; padding: 11px; font-size: 12px; }
+#session-name-dialog label { margin-top: 20px; }
 .checkbox-label { display: flex; gap: 8px; align-items: center; margin: 18px 0 5px; }
 input[type=checkbox] { accent-color: #b5dac4; }
 dialog .field-hint { font-size: 10px; color: #8e9d93; margin: 0 0 20px 27px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .danger { background: #553c33; color: #f3ccba; }
 @media (max-width: 760px) {
+  #session-name { font-size: 16px; }
   #app { --sidebar-width: 200px; }
   .brand { padding: 0 15px; }
   .terminal-header { align-items: flex-start; flex-direction: column; padding: 12px 15px; }

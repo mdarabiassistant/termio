@@ -98,4 +98,60 @@ final class SessionNameTests: XCTestCase {
         store.reconcileExternalSessions([try information(name: nil, revision: 3)], from: device, route: .local)
         XCTAssertNil(store.allSessions.first?.givenTitle)
     }
+
+    @MainActor
+    func testCompanionRenameRejectsBlankNamesAndInexactOrMissingIdentities() throws {
+        let session = Session(title: "Terminal 1", agent: .terminal)
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rename-validation-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        for (id, name) in [
+            (session.id.uuidString, " \n\t"),
+            (String(session.id.uuidString.prefix(8)), "My work"),
+            (UUID().uuidString, "My work"),
+        ] {
+            var failed = false
+            store.companionRenameSession(sessionID: id, name: name) { result in
+                if case .failure = result { failed = true }
+            }
+            XCTAssertTrue(failed)
+            XCTAssertNil(store.session(session.id)?.givenTitle)
+            XCTAssertNil(store.session(session.id)?.pendingName)
+        }
+    }
+
+    @MainActor
+    func testAQueuedRenameCannotConfirmAnEditThatWasSuperseded() throws {
+        let session = Session(title: "Terminal 1", agent: .terminal)
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rename-order-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        var firstResult: Result<Void, Error>?
+        store.setSessionName("First", for: session.id) { firstResult = $0 }
+        XCTAssertNil(firstResult)
+        let firstToken = store.session(session.id)?.pendingName?.token
+        store.setSessionName("Second", for: session.id)
+        if case .failure = firstResult {} else { XCTFail("The superseded edit must fail") }
+        XCTAssertEqual(store.session(session.id)?.givenTitle, "Second")
+        XCTAssertNotEqual(store.session(session.id)?.pendingName?.token, firstToken)
+        XCTAssertTrue(store.sessionNameCompletions.isEmpty)
+    }
+
+    @MainActor
+    func testRenamingADormantSessionQueuesItsNameWithoutStartingATerminal() throws {
+        let session = Session(title: "Terminal 1", agent: .terminal)
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rename-dormant-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        var result: Result<Void, Error>?
+        store.companionRenameSession(sessionID: session.id.uuidString, name: "  Dormant work  ") { result = $0 }
+        XCTAssertNil(result)
+        XCTAssertEqual(store.session(session.id)?.givenTitle, "Dormant work")
+        XCTAssertEqual(store.session(session.id)?.pendingName?.value, "Dormant work")
+        XCTAssertTrue(store.termiodLinks.isEmpty)
+        XCTAssertEqual(store.allSessions.count, 1)
+    }
 }

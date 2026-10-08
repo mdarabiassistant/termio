@@ -1064,6 +1064,7 @@ final class TermioStore: ObservableObject {
     var rosterFetches: [String: RosterFetch] = [:]
     var localSessionDiscoveryTimer: Timer?
     var sessionNameUploads: Set<Session.ID> = []
+    var sessionNameCompletions: [Session.ID: (token: UUID, complete: (Result<Void, Error>) -> Void)] = [:]
 
     /// Routes whose daemon this app has asked to stop and is waiting to see come
     /// back (`ensureRemoteReady`). A roster that fails meanwhile is the restart

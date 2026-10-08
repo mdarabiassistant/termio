@@ -38,6 +38,15 @@
         <div class="dialog-actions"><button type="submit" class="primary">Connect</button></div>
       </form>
     </dialog>
+    <dialog id="session-name-dialog" aria-labelledby="session-name-title">
+      <form id="session-name-form">
+        <h2 id="session-name-title">New Session</h2>
+        <label for="session-name">Session name</label>
+        <input id="session-name" type="text" autocomplete="off" spellcheck="false" required />
+        <p id="session-name-error" class="error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="cancel-session-name" type="button">Cancel</button><button id="save-session-name" type="submit" class="primary">Create Session</button></div>
+      </form>
+    </dialog>
     <dialog id="forget-dialog" aria-labelledby="forget-title">
       <form method="dialog"><h2 id="forget-title">Forget Machine?</h2><p id="forget-description"></p><p>Sessions keep running on the machine.</p><div class="dialog-actions"><button value="cancel">Cancel</button><button value="forget" class="danger">Forget Machine</button></div></form>
     </dialog>

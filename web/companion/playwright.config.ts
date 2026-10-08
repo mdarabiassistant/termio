@@ -8,7 +8,7 @@ export default defineConfig({
   testDir: './tests',
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
-    { name: 'webkit-touch', use: { browserName: 'webkit' }, grep: /touch keyboard (sends|fits)/ },
+    { name: 'webkit-touch', use: { browserName: 'webkit' }, grep: /touch keyboard (sends|fits)|session naming/ },
   ],
   fullyParallel: false,
   workers: 1,

@@ -140,6 +140,118 @@ final class TermiodWireOrderIntegrationTests: XCTestCase {
         case exit(Int32, Termiod.SessionInformation?)
     }
 
+    @MainActor
+    func testCompanionRenameConfirmsTheDaemonAndAnotherClientSeesTheSameName() async throws {
+        let session = Session(title: "Terminal 1", agent: .terminal)
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "companion-rename-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        let link = TermiodSessionLink(
+            sessionName: session.id.uuidString,
+            specification: Termiod.CreateSpecification(
+                cwd: NSTemporaryDirectory(), argv: ["/bin/cat"], env: [], rows: 24, cols: 80),
+            rows: 24, cols: 80)
+        let attached = expectation(description: "session exists")
+        link.onDaemonSessionID = { _ in attached.fulfill() }
+        link.start()
+        defer { link.detach() }
+        await fulfillment(of: [attached], timeout: 10)
+        let original = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == session.id.uuidString })
+        store.recordDaemonSessionID(original.id, for: session.id)
+        let server = CompanionServer(
+            port: 0, rosterProvider: { store.companionRoster() }, attachSession: { _ in nil },
+            startSession: { _, _ in nil }, stopSession: { _ in false },
+            startScratchTerminal: { _ in nil }, startSSHSession: { _, _ in nil },
+            renameSession: { id, name, completion in
+                store.companionRenameSession(sessionID: id, name: name, completion: completion)
+            })
+        server.start()
+        defer { server.stop() }
+        for _ in 0..<200 where (server.listeningPort ?? 0) == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        let port = try XCTUnwrap(server.listeningPort)
+        let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:\(port)/"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        let client = URLSession(configuration: configuration)
+        defer { client.invalidateAndCancel() }
+        let unpaired = client.webSocketTask(with: url)
+        unpaired.resume()
+        try await unpaired.send(.string(CompanionControl.renameSession(
+            sessionID: session.id.uuidString, name: "Unpaired edit", requestID: "unpaired").encoded()))
+        if case .string(let text) = try await unpaired.receive(),
+           case .error(_, let code) = CompanionControl.decode(text) {
+            XCTAssertEqual(code, WireRefusal.unauthorized)
+        } else { XCTFail("An unpaired rename must be refused") }
+        XCTAssertNil(store.session(session.id)?.givenTitle)
+        unpaired.cancel(with: .goingAway, reason: nil)
+        let paired = client.webSocketTask(with: url)
+        paired.resume()
+        defer { paired.cancel(with: .goingAway, reason: nil) }
+        try await paired.send(.string(CompanionControl.auth(token: PairingToken.current, wire: Wire.current).encoded()))
+        if case .string(let text) = try await paired.receive() {
+            XCTAssertNotNil(CompanionRoster.decode(text))
+        } else { XCTFail("Authentication must return the roster") }
+        for name in ["  New Session  ", "  Release \"λ\" 日本語  ", "Terminal 9"] {
+            let requestID = UUID().uuidString
+            try await paired.send(.string(CompanionControl.renameSession(
+                sessionID: session.id.uuidString, name: name, requestID: requestID).encoded()))
+            var confirmed = false
+            while !confirmed {
+                guard case .string(let text) = try await paired.receive() else { continue }
+                guard case .sessionRenamed(let id, let echoedName, let request, let error) = CompanionControl.decode(text) else { continue }
+                XCTAssertEqual(id, session.id.uuidString)
+                XCTAssertEqual(echoedName, name.trimmingCharacters(in: .whitespacesAndNewlines))
+                XCTAssertEqual(request, requestID)
+                XCTAssertNil(error)
+                confirmed = true
+            }
+            let fetched = try XCTUnwrap(Termiod.roster().sessions.first { $0.id == original.id })
+            XCTAssertEqual(fetched.customName, name.trimmingCharacters(in: .whitespacesAndNewlines))
+            XCTAssertEqual(fetched.name, original.name)
+            XCTAssertEqual(fetched.pid, original.pid)
+            XCTAssertNil(store.session(session.id)?.pendingName)
+            let nativeRow = store.companionRoster().projects.flatMap(\.sessions).first { $0.id == session.id.uuidString }
+            XCTAssertEqual(nativeRow?.title, fetched.customName)
+            let otherDefaults = try XCTUnwrap(UserDefaults(suiteName: "name-viewer-\(UUID().uuidString)"))
+            let other = TermioStore(workspaces: [Workspace(name: "Other")], projects: [], settings: AppSettings(defaults: otherDefaults))
+            other.reconcileExternalSessions([fetched], from: KnownDevice(alias: nil, deviceID: nil), route: .local)
+            XCTAssertEqual(other.allSessions.first?.givenTitle, fetched.customName)
+        }
+    }
+
+    @MainActor
+    func testANameRequestedBeforeTheFirstAttachmentIsConfirmedAfterTheDaemonIdentityArrives() async throws {
+        let session = Session(title: "Terminal 1", agent: .terminal)
+        var workspace = Workspace(name: "Local")
+        workspace.terminals = [session]
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rename-creation-\(UUID().uuidString)"))
+        let store = TermioStore(workspaces: [workspace], projects: [], settings: AppSettings(defaults: defaults))
+        let confirmed = expectation(description: "name confirmed after first attachment")
+        var confirmation: Result<Void, Error>?
+        store.companionRenameSession(sessionID: session.id.uuidString, name: "New Session") { result in
+            confirmation = result
+            confirmed.fulfill()
+        }
+        XCTAssertNil(confirmation)
+        let link = TermiodSessionLink(
+            sessionName: session.id.uuidString,
+            specification: Termiod.CreateSpecification(
+                cwd: NSTemporaryDirectory(), argv: ["/bin/cat"], env: [], rows: 24, cols: 80,
+                customName: store.session(session.id)?.givenTitle), rows: 24, cols: 80)
+        link.onDaemonSessionID = { daemonID in
+            Task { @MainActor in store.recordDaemonSessionID(daemonID, for: session.id) }
+        }
+        link.start()
+        defer { link.detach() }
+        await fulfillment(of: [confirmed], timeout: 10)
+        if case .success = confirmation {} else { XCTFail("The first attachment must confirm the name") }
+        let fetched = try XCTUnwrap(Termiod.roster().sessions.first { $0.name == session.id.uuidString })
+        XCTAssertEqual(fetched.customName, "New Session")
+        XCTAssertEqual(store.session(session.id)?.givenTitle, fetched.customName)
+        XCTAssertNil(store.session(session.id)?.pendingName)
+    }
+
     /// A session that outlives one foreground poll (2 s, `session.rs`
     /// `FOREGROUND_POLL`) and then exits with a status worth telling apart from
     /// zero, so the run covers a live update *and* a distinctive ending.

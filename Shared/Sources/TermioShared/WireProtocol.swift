@@ -12,11 +12,12 @@ import Foundation
 ///      device, and its `branch`/`kind` became required. A v1 peer can't read a
 ///      v2 roster, so both minimums move with it: the mismatch has to say
 ///      "update the other end" rather than draw an empty project list.
+///   3: 2026-10-08: session rename requests and daemon-confirmed results.
 public enum Wire {
     /// A peer that predates the field entirely. Absent decodes to this.
     public static let legacy = 0
     /// This build's revision.
-    public static let current = 2
+    public static let current = 3
     /// Oldest Mac this phone will talk to.
     public static let minimumServer = 2
     /// Oldest phone this Mac will serve.
@@ -108,6 +109,12 @@ public enum CompanionControl: Codable, Sendable, Equatable {
     /// The client asks the Mac to close a session (the phone's swipe-to-remove).
     /// No success reply — the next roster push drops the row everywhere.
     case stop(sessionID: String)
+    /// Changes the display name without changing the session's attach identity.
+    /// The request token correlates a result even after the client times out.
+    case renameSession(sessionID: String, name: String, requestID: String)
+    /// Sent after the owning daemon confirms the name, or with an error when
+    /// the edit remains queued for a later connection.
+    case sessionRenamed(sessionID: String, name: String, requestID: String, error: String?)
     /// The client's terminal grid changed, or it stopped showing the session.
     ///
     /// This is a *viewport* declaration, not a claim on the session: the Mac
@@ -236,6 +243,14 @@ public enum CompanionControl: Codable, Sendable, Equatable {
             return Self.json(fields)
         case .stop(let sessionID):
             return #"{"t":"stop","session":"\#(sessionID)"}"#
+        case .renameSession(let sessionID, let name, let requestID):
+            return Self.json(["t": "renameSession", "session": sessionID, "name": name, "request": requestID])
+        case .sessionRenamed(let sessionID, let name, let requestID, let error):
+            var fields: [String: Any] = [
+                "t": "sessionRenamed", "session": sessionID, "name": name, "request": requestID,
+            ]
+            if let error { fields["error"] = error }
+            return Self.json(fields)
         case .resize(let cols, let rows, let rendering, let surface):
             var fields: [String: Any] = [
                 "t": "resize", "cols": cols, "rows": rows, "rendering": rendering,
@@ -366,6 +381,15 @@ public enum CompanionControl: Codable, Sendable, Equatable {
         case "stop":
             guard let sessionID = obj["session"] as? String else { return nil }
             return .stop(sessionID: sessionID)
+        case "renameSession", "sessionRenamed":
+            guard let sessionID = obj["session"] as? String,
+                  let name = obj["name"] as? String,
+                  let requestID = obj["request"] as? String else { return nil }
+            if type == "renameSession" {
+                return .renameSession(sessionID: sessionID, name: name, requestID: requestID)
+            }
+            return .sessionRenamed(
+                sessionID: sessionID, name: name, requestID: requestID, error: obj["error"] as? String)
         case "resize":
             guard let cols = obj["cols"] as? Int, let rows = obj["rows"] as? Int else { return nil }
             var surface: TerminalGrid?

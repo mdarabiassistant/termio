@@ -197,6 +197,7 @@ final class CompanionServer {
     /// reads as the agent producing output and promotes an idle row.
     private let startSession: (String, String?) -> (sessionID: String, agentID: String)?
     private let stopSession: (String) -> Bool
+    private let renameSession: (String, String, @escaping (Result<Void, Error>) -> Void) -> Void
     /// Opens a plain shell in the loose terminals funnel for the phone's
     /// Terminals ＋ (`.startTerminal`); returns the `.started` echo, or nil on
     /// failure. Project-less: the funnel is found-or-created on the Mac, in the
@@ -212,6 +213,7 @@ final class CompanionServer {
     /// pointing at a port it does not answer on.
     var onListenerFailed: (() -> Void)?
     private var listener: NWListener?
+    var listeningPort: UInt16? { listener?.port?.rawValue }
     private var connections: Set<ObjectIdentifier> = []
     private var connectionByID: [ObjectIdentifier: NWConnection] = [:]
     /// Connections that have presented the pairing token. Everyone else gets
@@ -236,7 +238,8 @@ final class CompanionServer {
         startSession: @escaping (String, String?) -> (sessionID: String, agentID: String)?,
         stopSession: @escaping (String) -> Bool,
         startScratchTerminal: @escaping (String?) -> (sessionID: String, agentID: String)?,
-        startSSHSession: @escaping (String, String?) -> (sessionID: String, agentID: String)?
+        startSSHSession: @escaping (String, String?) -> (sessionID: String, agentID: String)?,
+        renameSession: @escaping (String, String, @escaping (Result<Void, Error>) -> Void) -> Void
     ) {
         self.port = port
         self.rosterProvider = rosterProvider
@@ -245,6 +248,7 @@ final class CompanionServer {
         self.stopSession = stopSession
         self.startScratchTerminal = startScratchTerminal
         self.startSSHSession = startSSHSession
+        self.renameSession = renameSession
     }
 
     func start() {
@@ -503,6 +507,20 @@ final class CompanionServer {
             if !stopSession(sessionID) {
                 sendControl(.error(message: "unknown session — pull the list to refresh"), to: connection)
             }
+        case .renameSession(let sessionID, let name, let requestID):
+            let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            renameSession(sessionID, name) { [weak self, weak connection] result in
+                guard let self, let connection,
+                      self.authenticatedWireByConnection[id] != nil else { return }
+                let error: String?
+                switch result {
+                case .success: error = nil
+                case .failure(let failure): error = failure.localizedDescription
+                }
+                self.sendControl(.sessionRenamed(
+                    sessionID: sessionID, name: name, requestID: requestID, error: error), to: connection)
+                self.broadcastIfChanged()
+            }
         case .resize(let cols, let rows, let rendering, let surface):
             // The phone reports its grid on attach, foreground, and layout.
             // A report is a fact about the phone's screen, not a claim on the
@@ -538,7 +556,7 @@ final class CompanionServer {
             Log.companion.notice(
                 "ignoring unsupported control \(Self.loggableTag(type), privacy: .public)"
             )
-        case .auth, .exit, .grid, .error, .started, .fileList, .file, .written, .uploaded,
+        case .auth, .exit, .grid, .error, .started, .sessionRenamed, .fileList, .file, .written, .uploaded,
              .searchResults, .sshConfigList, .changes, .diff:
             break
         }
@@ -1305,8 +1323,11 @@ extension TermioStore {
             switchToWorkspace(workspace.id)
         }
         addScratchSession(agent: .terminal)
-        guard let sessionID = selectedSessionID?.uuidString else { return nil }
-        return (sessionID, AgentPreset.terminal.wireName)
+        guard let id = selectedSessionID, let session = session(id) else { return nil }
+        // Start the daemon attachment here so naming can wait for its identity
+        // before the browser opens a terminal connection.
+        _ = surface(for: session)
+        return (id.uuidString, AgentPreset.terminal.wireName)
     }
 
     /// Open an SSH terminal to `host` for the phone's Terminals-tab ＋ → "New
@@ -1342,6 +1363,22 @@ extension TermioStore {
         guard let session = findCompanionSession(wireID) else { return false }
         closeSession(session.id)
         return true
+    }
+
+    func companionRenameSession(
+        sessionID wireID: String, name: String, completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            completion(.failure(TermiodClientError.requestFailed("Enter a session name.")))
+            return
+        }
+        // A rename must identify one row, never whichever prefix happens to match first.
+        guard let id = UUID(uuidString: wireID), session(id) != nil else {
+            completion(.failure(TermiodClientError.requestFailed("The session is no longer available.")))
+            return
+        }
+        setSessionName(name, for: id, completion: completion)
     }
 
     private func findCompanionSession(_ wireID: String) -> Session? {

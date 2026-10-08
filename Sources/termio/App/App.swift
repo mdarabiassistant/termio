@@ -467,6 +467,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             },
             startSSHSession: { [weak store] host, workspaceID in
                 store?.companionStartSSHSession(host: host, workspaceID: workspaceID)
+            },
+            renameSession: { [weak store] sessionID, name, completion in
+                guard let store else {
+                    completion(.failure(TermiodClientError.requestFailed("Termio is no longer running.")))
+                    return
+                }
+                store.companionRenameSession(sessionID: sessionID, name: name, completion: completion)
             }
         )
         companionServer = companion

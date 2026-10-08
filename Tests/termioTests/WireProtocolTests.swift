@@ -28,6 +28,26 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(CompanionControl.decode(auth.encoded()), auth)
     }
 
+    func testSessionRenameRoundTripsArbitraryNamesAndCorrelatedResults() {
+        let name = "Release \"λ\" 日本語 \\ branch"
+        let request = CompanionControl.renameSession(sessionID: "session-id", name: name, requestID: "request-id")
+        XCTAssertEqual(CompanionControl.decode(request.encoded()), request)
+        for error: String? in [nil, "The machine is offline."] {
+            let reply = CompanionControl.sessionRenamed(
+                sessionID: "session-id", name: name, requestID: "request-id", error: error)
+            XCTAssertEqual(CompanionControl.decode(reply.encoded()), reply)
+        }
+        for malformed in [
+            #"{"t":"renameSession","session":"s","name":"n"}"#,
+            #"{"t":"renameSession","session":"s","name":42,"request":"r"}"#,
+            #"{"t":"sessionRenamed","name":"n","request":"r"}"#,
+        ] {
+            XCTAssertNil(CompanionControl.decode(malformed))
+        }
+        XCTAssertEqual(Wire.minimumClient, 2)
+        XCTAssertEqual(Wire.minimumServer, 2)
+    }
+
     func testAuthWithoutWireDecodesAsLegacy() {
         XCTAssertEqual(
             CompanionControl.decode(#"{"t":"auth","token":"pairing-token"}"#),
