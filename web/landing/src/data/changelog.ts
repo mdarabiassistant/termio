@@ -17,6 +17,21 @@ export type ChangelogEntry = {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "0.56.0",
+    date: "2026-10-08",
+    title: "Your sessions in a browser",
+    changes: {
+      new: [
+        "Use the web companion on your computer, phone, or tablet. Pair with your Mac to open existing sessions or start a new terminal.",
+        "Name new sessions and rename existing ones from the web companion. Names are shared with the session’s machine and native clients.",
+      ],
+      improved: [
+        "The browser’s touch keyboard includes Esc, Tab, Ctrl, Alt, arrows, Home, End, and Page Up/Down.",
+        "Help in the web companion explains pairing, terminal controls, and connection errors.",
+      ],
+    },
+  },
+  {
     version: "0.55.5",
     date: "2026-10-05",
     title: "SSH-created sessions appear on the local Mac",
