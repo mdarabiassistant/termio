@@ -2,7 +2,7 @@ export const wireVersion = 2;
 
 export interface PairingAddress { url: string; token: string; endpoint: string; host: string }
 export interface Session { id: string; title: string; agent: string; status: string; subtitle: string }
-export interface Project { id: string; deviceAlias: string; sessions: Session[] }
+export interface Project { id: string; workspaceID: string; deviceAlias: string; sessions: Session[] }
 export interface Roster { macID: string; macName: string; projects: Project[] }
 export type Control = Record<string, unknown> & { t: string };
 
@@ -49,7 +49,7 @@ export function parseRoster(message: Control): Roster {
   return {
     macID: string(message.macID), macName: string(message.macName),
     projects: records(message.projects).filter((project) => string(project.id)).map((project) => ({
-      id: string(project.id), deviceAlias: string(project.deviceAlias),
+      id: string(project.id), workspaceID: string(project.workspaceID), deviceAlias: string(project.deviceAlias),
       sessions: records(project.sessions).filter((session) => string(session.id)).map((session) => ({
         id: string(session.id), title: string(session.title, 'Session'), agent: string(session.agent),
         status: string(session.status), subtitle: string(session.subtitle),
