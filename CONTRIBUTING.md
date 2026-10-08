@@ -93,6 +93,12 @@ groups sessions by machine; select a session to use its terminal on the right.
 **Remember on this browser** is checked; remembered addresses include the pairing
 token. Browser storage for local files may change if the HTML file is moved.
 
+On phones and tablets, focus the terminal or tap **Keyboard** to show Esc, Tab,
+Ctrl, Alt, arrows, Home, End, and Page Up/Down. Ctrl and Alt apply to the next
+key; tap a selected modifier again to cancel it. Tap **Keyboard** again to
+dismiss the keyboard. The extra keys stay above the on-screen keyboard, and
+starting input on a narrow touch screen collapses the sidebar.
+
 To rebuild the file from source, use Node.js 22, as specified in
 `web/companion/.node-version`:
 
@@ -108,7 +114,7 @@ For development and verification:
 
 ```sh
 npm run dev                    # optional development server with live reload
-npx playwright install chromium
+npx playwright install chromium webkit
 npm test                       # opens the built HTML via file://
 ```
 

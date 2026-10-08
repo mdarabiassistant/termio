@@ -3,6 +3,7 @@ import './style.css';
 import { Connection, type ConnectionStatus } from './connection';
 import { machineSections, pairingAddress, parseRoster, refusal, type PairingAddress, type Roster, type Session } from './protocol';
 import { TerminalSession } from './terminal';
+import { TouchKeyboard } from './touch-keyboard';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -43,6 +44,10 @@ const sidebar = element('sidebar');
 const sidebarToggle = element<HTMLButtonElement>('toggle-sidebar');
 const terminalPane = document.querySelector<HTMLElement>('.terminal-pane');
 let sidebarAnimation: Animation | undefined;
+const touchKeyboard = new TouchKeyboard(app, element('terminal-surface'), element('touch-keys'),
+  element<HTMLButtonElement>('toggle-keyboard'), () => terminal, () => {
+    if (matchMedia('(max-width: 760px)').matches && !app.classList.contains('sidebar-collapsed')) sidebarToggle.click();
+  });
 
 sidebarToggle.addEventListener('click', (event) => {
   const previousLeft = terminalPane?.getBoundingClientRect().left ?? 0;
@@ -221,6 +226,7 @@ function setSessionStatus(status: string, error = ''): void {
   element('terminal-error').textContent = error;
   element('terminal-error').hidden = !error;
   sessionReconnect.hidden = status === 'Connected' || !selected;
+  touchKeyboard.refresh();
 }
 
 function openSession(machine: Machine, session: Session, alias: string): void {
@@ -234,7 +240,7 @@ function openSession(machine: Machine, session: Session, alias: string): void {
   element('detach-session').hidden = false;
   element('terminal-caption').textContent = 'Type in the terminal to control this session';
   terminal = new TerminalSession(machine.address, session.id, element('terminal-surface'), setSessionStatus,
-    (size) => { element('terminal-size').textContent = size; }, screenReader.checked);
+    (size) => { element('terminal-size').textContent = size; }, screenReader.checked, () => touchKeyboard.refresh());
   renderMachines();
   terminal.focus();
 }

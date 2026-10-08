@@ -3,6 +3,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Connection } from './connection';
 import { refusal, validGrid, type Control, type PairingAddress } from './protocol';
 
+export type TerminalKey = 'Escape' | 'Tab' | 'Control' | 'Alt' | 'ArrowLeft' | 'ArrowDown' | 'ArrowUp' | 'ArrowRight' | 'Home' | 'End' | 'PageUp' | 'PageDown';
+
 export class TerminalSession {
   private terminal!: Terminal;
   private fit!: FitAddon;
@@ -15,6 +17,8 @@ export class TerminalSession {
   private disposed = false;
   private sharedGrid = false;
   private connected = false;
+  private control = false;
+  private alt = false;
   private viewport = { cols: 80, rows: 24 };
   private lastViewport = '';
   private resizeFrame = 0;
@@ -22,10 +26,12 @@ export class TerminalSession {
 
   constructor(address: PairingAddress, private sessionID: string, private container: HTMLElement,
     private status: (status: string, error?: string) => void,
-    private dimensions: (text: string) => void, private screenReaderMode: boolean) {
+    private dimensions: (text: string) => void, private screenReaderMode: boolean,
+    private inputChanged: () => void = () => {}) {
     this.link = new Connection(address, {
       status: (status, error) => {
         this.connected = false;
+        this.clearModifiers();
         this.generation++;
         this.queue = [];
         this.queuedBytes = 0;
@@ -70,7 +76,22 @@ export class TerminalSession {
     this.fit = new FitAddon();
     this.terminal.loadAddon(this.fit);
     this.terminal.open(this.container);
-    this.terminal.onData((data) => { if (this.connected) this.link.send(new TextEncoder().encode(data)); });
+    this.terminal.onData((data) => {
+      if (!this.canInput) return;
+      // Soft keyboards emit text input, so a one-shot modifier must also handle onData.
+      if ([...data].length === 1) {
+        const code = data.charCodeAt(0);
+        if (this.control) {
+          if (data === ' ') data = '\x00';
+          else if (data === '?') data = '\x7f';
+          else if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
+          else if (code >= 97 && code <= 122) data = String.fromCharCode(code - 96);
+        }
+        if (this.alt) data = `\x1b${data}`;
+      }
+      this.clearModifiers();
+      this.link.send(new TextEncoder().encode(data));
+    });
     this.terminal.onBinary((data) => {
       if (this.connected) this.link.send(Uint8Array.from(data, (character) => character.charCodeAt(0)));
     });
@@ -144,6 +165,7 @@ export class TerminalSession {
       } else if (message.t === 'exit' || message.t === 'error') {
         this.link.close();
         this.connected = false;
+        this.clearModifiers();
         this.terminal.options.disableStdin = true;
         this.status(message.t === 'exit' ? `Ended (${Number(message.code) || 0})` : 'Disconnected',
           message.t === 'error' ? refusal(message) : undefined);
@@ -153,7 +175,42 @@ export class TerminalSession {
     }
   }
 
+  get canInput(): boolean { return this.connected && !this.disposed; }
+  get controlPressed(): boolean { return this.control; }
+  get altPressed(): boolean { return this.alt; }
+
+  clearModifiers(): void {
+    if (!this.control && !this.alt) return;
+    this.control = false;
+    this.alt = false;
+    this.inputChanged();
+  }
+
+  pressKey(key: TerminalKey): void {
+    if (!this.canInput) return;
+    if (key === 'Control' || key === 'Alt') {
+      if (key === 'Control') this.control = !this.control;
+      else this.alt = !this.alt;
+      this.inputChanged();
+      return;
+    }
+    const modifier = 1 + (this.alt ? 2 : 0) + (this.control ? 4 : 0);
+    let data: string;
+    if (key === 'Escape' || key === 'Tab') {
+      data = (this.alt ? '\x1b' : '') + (key === 'Escape' ? '\x1b' : '\t');
+    } else if (key === 'PageUp' || key === 'PageDown') {
+      data = `\x1b[${key === 'PageUp' ? 5 : 6}${modifier > 1 ? `;${modifier}` : ''}~`;
+    } else {
+      const suffix = { ArrowLeft: 'D', ArrowDown: 'B', ArrowUp: 'A', ArrowRight: 'C', Home: 'H', End: 'F' }[key];
+      const prefix = modifier > 1 ? `[1;${modifier}` : this.terminal.modes.applicationCursorKeysMode ? 'O' : '[';
+      data = `\x1b${prefix}${suffix}`;
+    }
+    this.clearModifiers();
+    this.terminal.input(data, true);
+  }
+
   focus(): void { this.terminal.focus(); }
+  blur(): void { this.terminal.blur(); this.clearModifiers(); }
   reconnect(): void { this.link.connect(); this.focus(); }
   setScreenReaderMode(enabled: boolean): void {
     this.screenReaderMode = enabled;
@@ -163,6 +220,7 @@ export class TerminalSession {
   dispose(): void {
     this.reportViewport(false);
     this.disposed = true;
+    this.clearModifiers();
     this.link.close();
     this.observer.disconnect();
     cancelAnimationFrame(this.resizeFrame);
