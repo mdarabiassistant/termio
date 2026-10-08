@@ -7,7 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { pairingAddress, machineSections, parseRoster } from '../src/protocol';
 
 const projects = [
-  { id: 'local', deviceAlias: null, name: 'Hidden project', workspaceName: 'Hidden workspace', sessions: [
+  { id: 'local', deviceAlias: null, name: 'Hidden project', workspaceID: 'local-workspace', workspaceName: 'Hidden workspace', sessions: [
     { id: 'shell', title: 'Local shell', agent: 'terminal', status: 'idle' },
     { id: 'agent', title: 'Build the companion', agent: 'codex', status: 'working' },
   ] },
@@ -202,6 +202,130 @@ test('supports multiple Macs, opt-in persistence, and confirmed forgetting', asy
   await page.getByRole('button', { name: 'Forget Studio Mac' }).click();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('heading', { name: 'Studio Mac', exact: true })).toBeVisible();
+});
+
+test('creates and opens a terminal with the Android workspace hint', async ({ page }, testInfo) => {
+  await openShell(page);
+  const oldSocket = sessionSockets.get('shell');
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Opening…', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Opening…', exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  const request = controls.find((entry) => entry.message.t === 'startTerminal');
+  expect(request?.message).toEqual({ t: 'startTerminal', workspace: 'local-workspace' });
+  expect(rosterSockets.has(request!.socket)).toBe(true);
+  expect(oldSocket?.readyState).toBe(WebSocket.OPEN);
+  const created = { id: 'new-terminal', title: 'New shell', agent: 'terminal', status: 'idle' };
+  roster(request!.socket, [{ ...projects[0], sessions: [...projects[0].sessions, created] }, projects[1]]);
+  request!.socket.send(JSON.stringify({ t: 'started', session: created.id, agent: 'terminal' }));
+  await expect(page.locator('#session-title')).toHaveText('New shell');
+  await expect.poll(() => terminalText(page)).toContain('new-terminal ready');
+  await expect.poll(() => oldSocket?.readyState).toBe(WebSocket.CLOSED);
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: /New shell/ })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
+  await page.keyboard.type('echo created');
+  await expect.poll(() => Buffer.concat(inputs.map((input) => input.bytes)).toString()).toBe('echo created');
+  expect(inputs.every((input) => input.session === created.id)).toBe(true);
+  expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('new-terminal-desktop.png') });
+});
+
+test('creates the first terminal without a workspace and opens it before the roster update', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 680, height: 700 });
+  await page.goto('./index.html');
+  await pair(page);
+  await expect(page.getByRole('heading', { name: 'Studio Mac', exact: true })).toBeVisible();
+  for (const socket of rosterSockets) roster(socket, []);
+  await expect(page.locator('.session-row')).toHaveCount(0);
+  await expect(page.getByText('Choose New Terminal to start a session on your Mac.')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('new-terminal-empty.png') });
+  await page.getByLabel('Screen reader', { exact: true }).check();
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  const request = controls.find((entry) => entry.message.t === 'startTerminal');
+  expect(request?.message).toEqual({ t: 'startTerminal' });
+  request!.socket.send(JSON.stringify({ t: 'started', session: 'first-terminal', agent: 'terminal' }));
+  await expect.poll(() => terminalText(page)).toContain('first-terminal ready');
+  await expect(page.locator('#session-title')).toHaveText('Terminal');
+  roster(request!.socket, [{ ...projects[0], sessions: [{ id: 'first-terminal', title: 'First shell', agent: 'terminal', status: 'idle' }] }]);
+  await expect(page.locator('#session-title')).toHaveText('First shell');
+  await expect(page.locator('#session-status')).toHaveText('Connected');
+  await page.screenshot({ path: testInfo.outputPath('new-terminal-narrow.png') });
+});
+
+test('shows creation failures and lets the user retry without dropping the current session', async ({ page }) => {
+  await openShell(page);
+  const currentSocket = sessionSockets.get('shell');
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
+  socket.send(JSON.stringify({ t: 'error', message: 'Couldn’t open a terminal.' }));
+  await expect(page.getByRole('alert')).toContainText('Couldn’t open a terminal.');
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
+  await expect(page.locator('#session-title')).toHaveText('Local shell');
+  expect(currentSocket?.readyState).toBe(WebSocket.OPEN);
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(2);
+  await expect(page.getByRole('alert')).not.toBeVisible();
+  socket.send(JSON.stringify({ t: 'started', session: '' }));
+  await expect(page.getByRole('alert')).toContainText('The Mac didn’t return a session.');
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
+  expect(sessionSockets.size).toBe(1);
+});
+
+test('clears a pending creation on connection loss without replaying the request', async ({ page }) => {
+  await page.goto('./index.html');
+  await pair(page);
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  controls.find((entry) => entry.message.t === 'startTerminal')!.socket.terminate();
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
+  expect(controls.filter((entry) => entry.message.t === 'startTerminal')).toHaveLength(1);
+  await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeDisabled();
+});
+
+test('times out a creation without replaying it or opening a late reply', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('./index.html');
+  await pair(page);
+  await page.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  await page.clock.fastForward(15001);
+  await expect(page.getByRole('alert')).toContainText('Check the session list before trying again.');
+  await expect(page.getByRole('button', { name: 'New Terminal', exact: true })).toBeEnabled();
+  const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
+  socket.send(JSON.stringify({ t: 'started', session: 'late-terminal' }));
+  // A later roster still lists the session, but the expired request no longer changes selection.
+  roster(socket, [{ ...projects[0], sessions: [{ id: 'late-terminal', title: 'Late shell', agent: 'terminal', status: 'idle' }] }]);
+  await expect(page.getByRole('button', { name: /Late shell/ })).toBeVisible();
+  await expect(page.locator('#terminal-viewport')).not.toBeVisible();
+  expect(controls.filter((entry) => entry.message.t === 'startTerminal')).toHaveLength(1);
+  expect(sessionSockets.size).toBe(0);
+});
+
+test('creates on the chosen Mac and respects a later session selection', async ({ page }) => {
+  await openShell(page);
+  macID = 'second-mac'; macName = 'Laptop';
+  await pair(page, address.replace('/?', '/second?'));
+  const laptop = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Laptop', exact: true }) });
+  await laptop.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(1);
+  const socket = controls.find((entry) => entry.message.t === 'startTerminal')!.socket;
+  socket.send(JSON.stringify({ t: 'started', session: 'laptop-terminal' }));
+  await expect.poll(() => terminalText(page)).toContain('laptop-terminal ready');
+  await expect(page.locator('#session-context')).toHaveText('Laptop / This machine');
+  await laptop.getByRole('button', { name: 'New Terminal', exact: true }).click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(2);
+  await laptop.getByRole('button', { name: /Deployment logs/ }).click();
+  await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
+  socket.send(JSON.stringify({ t: 'started', session: 'background-terminal' }));
+  roster(socket, [{ ...projects[0], sessions: [{ id: 'background-terminal', title: 'Background shell', agent: 'terminal', status: 'idle' }] }, projects[1]]);
+  await expect(laptop.getByRole('button', { name: /Background shell/ })).toBeVisible();
+  await expect(page.locator('#session-title')).toHaveText('Deployment logs');
+  expect(sessionSockets.has('background-terminal')).toBe(false);
 });
 
 test('shows rejected tokens without a retry loop and validates Direct Attach links', async ({ page }) => {

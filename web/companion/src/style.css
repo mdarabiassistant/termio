@@ -33,6 +33,7 @@ h1 { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; le
 .online-text { color: #a0c7ac !important; }
 .machine-state { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #a0aaa6; padding: 0 8px 9px 24px; }
 .text-button { border: none; background: none; color: #a7c6b4; padding: 4px 3px; font-size: 11px; }
+.new-terminal { width: calc(100% - 34px); margin: 0 10px 6px 24px; min-height: 32px; font-size: 11px; }
 .group-heading { display: flex; gap: 6px; align-items: center; width: 100%; background: none; border: none; text-align: left; padding: 10px 10px 8px; font-size: 11px; color: #aab4b0; }
 .group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .chevron { width: 8px; color: #87938d; }
@@ -116,4 +117,8 @@ dialog .field-hint { font-size: 10px; color: #8e9d93; margin: 0 0 20px 27px; }
 #toggle-keyboard { min-height: 44px; }
 @container (min-width: 640px) {
   .touch-keys { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+}
+
+@media (pointer: coarse) {
+  .new-terminal { min-height: 44px; }
 }

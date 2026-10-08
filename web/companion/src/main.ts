@@ -26,12 +26,14 @@ function button(label: string, className: string, action: () => void): HTMLButto
 interface Machine {
   id: string; address: PairingAddress; remember: boolean; name: string; roster?: Roster;
   status: ConnectionStatus; error: string; link: Connection; collapsed: Set<string>;
+  pendingTerminal?: ReturnType<typeof setTimeout>;
 }
 const storageKey = 'termio.web.machines.v1';
 const machines = new Map<string, Machine>();
 let selected: { machineID: string; sessionID: string; alias: string } | undefined;
 let terminal: TerminalSession | undefined;
 let forgetID: string | undefined;
+let openingTerminalMachineID: string | undefined;
 const pairDialog = element<HTMLDialogElement>('pair-dialog');
 const pairInput = element<HTMLInputElement>('pair-address');
 const rememberInput = element<HTMLInputElement>('remember-machine');
@@ -91,10 +93,34 @@ function save(): void {
   }
 }
 
+function clearTerminalStart(machine: Machine): void {
+  clearTimeout(machine.pendingTerminal);
+  machine.pendingTerminal = undefined;
+  if (openingTerminalMachineID === machine.id) openingTerminalMachineID = undefined;
+}
+
+function startTerminal(machine: Machine): void {
+  if (machine.status !== 'Connected' || machine.pendingTerminal !== undefined) return;
+  machine.error = '';
+  openingTerminalMachineID = machine.id;
+  machine.pendingTerminal = setTimeout(() => {
+    clearTerminalStart(machine);
+    machine.error = 'The Mac didn’t confirm the new terminal. Check the session list before trying again.';
+    renderMachines();
+  }, 15000);
+  const workspace = machine.roster?.projects[0]?.workspaceID;
+  if (!machine.link.send({ t: 'startTerminal', ...(workspace ? { workspace } : {}) })) {
+    clearTerminalStart(machine);
+    machine.error = 'Couldn’t request a new terminal. Reconnect to this Mac and try again.';
+  }
+  renderMachines();
+}
+
 function addMachine(address: PairingAddress, remember: boolean, name = address.host): void {
   const previous = [...machines.values()].find((machine) => machine.address.endpoint === address.endpoint);
   if (previous) {
     if (selected?.machineID === previous.id) detach();
+    clearTerminalStart(previous);
     previous.link.close();
     machines.delete(previous.id);
   }
@@ -105,6 +131,7 @@ function addMachine(address: PairingAddress, remember: boolean, name = address.h
     status: (status, error = '') => {
       machine.status = status;
       machine.error = error;
+      if (status !== 'Connected') clearTerminalStart(machine);
       renderMachines();
     },
     message: (message) => {
@@ -116,6 +143,7 @@ function addMachine(address: PairingAddress, remember: boolean, name = address.h
         for (const other of machines.values()) {
           if (other.id !== machine.id && machine.roster.macID && other.roster?.macID === machine.roster.macID) {
             if (selected?.machineID === other.id) detach();
+            clearTerminalStart(other);
             other.link.close();
             machines.delete(other.id);
           }
@@ -127,7 +155,22 @@ function addMachine(address: PairingAddress, remember: boolean, name = address.h
         }
         save();
         renderMachines();
+      } else if (message.t === 'started') {
+        if (machine.pendingTerminal === undefined) return;
+        const shouldOpen = openingTerminalMachineID === machine.id;
+        clearTerminalStart(machine);
+        if (typeof message.session !== 'string' || !message.session.trim()) {
+          machine.error = 'The Mac didn’t return a session. Check the session list before trying again.';
+          renderMachines();
+          return;
+        }
+        const project = machine.roster?.projects.find((project) => project.sessions.some((session) => session.id === message.session));
+        const session = project?.sessions.find((session) => session.id === message.session)
+          ?? { id: message.session, title: 'Terminal', agent: 'terminal', status: 'idle', subtitle: '' };
+        if (shouldOpen) openSession(machine, session, project?.deviceAlias ?? '');
+        else renderMachines();
       } else if (message.t === 'error') {
+        clearTerminalStart(machine);
         machine.error = refusal(message);
         renderMachines();
       }
@@ -167,6 +210,7 @@ function renderMachines(): void {
     state.append(node('span', '', machine.status));
     const reconnect = button(machine.status === 'Connected' ? 'Disconnect' : 'Reconnect', 'text-button', () => {
       if (machine.status === 'Connected') {
+        clearTerminalStart(machine);
         machine.link.close();
         machine.status = 'Disconnected';
         machine.error = '';
@@ -177,10 +221,19 @@ function renderMachines(): void {
     reconnect.dataset.focusKey = `connection-${machine.id}`;
     state.append(reconnect);
     section.append(state);
-    if (machine.error) section.append(node('p', 'machine-error', machine.error));
+    const newTerminal = button(machine.pendingTerminal !== undefined ? 'Opening…' : 'New Terminal', 'new-terminal', () => startTerminal(machine));
+    newTerminal.disabled = machine.status !== 'Connected' || machine.pendingTerminal !== undefined;
+    newTerminal.setAttribute('aria-busy', String(machine.pendingTerminal !== undefined));
+    newTerminal.dataset.focusKey = `new-terminal-${machine.id}`;
+    section.append(newTerminal);
+    if (machine.error) {
+      const error = node('p', 'machine-error', machine.error);
+      error.setAttribute('role', 'alert');
+      section.append(error);
+    }
     if (machine.roster) {
       const groups = machineSections(machine.roster.projects);
-      if (!groups.length) section.append(node('p', 'empty-machines', 'Open a session in Termio on your Mac.'));
+      if (!groups.length) section.append(node('p', 'empty-machines', 'Choose New Terminal to start a session on your Mac.'));
       for (const group of groups) {
         const groupName = group.alias || 'This machine';
         const collapsed = machine.collapsed.has(group.alias);
@@ -217,7 +270,7 @@ function renderMachines(): void {
   const emptyTitle = element('empty-terminal').querySelector('h2');
   const emptyDescription = element('empty-terminal').querySelector('p');
   if (emptyTitle) emptyTitle.textContent = machines.size ? 'Select a session' : 'Your sessions, here.';
-  if (emptyDescription) emptyDescription.textContent = machines.size ? 'Choose a session from the machines on the left.' : 'Connect a machine, then select a session.';
+  if (emptyDescription) emptyDescription.textContent = machines.size ? 'Choose a session or New Terminal from the machines on the left.' : 'Connect a machine, then select a session.';
 }
 
 function setSessionStatus(status: string, error = ''): void {
@@ -230,6 +283,7 @@ function setSessionStatus(status: string, error = ''): void {
 }
 
 function openSession(machine: Machine, session: Session, alias: string): void {
+  openingTerminalMachineID = undefined;
   if (selected?.machineID === machine.id && selected.sessionID === session.id) { terminal?.focus(); return; }
   terminal?.dispose();
   selected = { machineID: machine.id, sessionID: session.id, alias };
@@ -246,6 +300,7 @@ function openSession(machine: Machine, session: Session, alias: string): void {
 }
 
 function detach(): void {
+  openingTerminalMachineID = undefined;
   terminal?.dispose();
   terminal = undefined;
   selected = undefined;
@@ -275,6 +330,7 @@ element('pair-form').addEventListener('submit', (event) => {
 forgetDialog.addEventListener('close', () => {
   if (forgetDialog.returnValue === 'forget' && forgetID) {
     const machine = machines.get(forgetID);
+    if (machine) clearTerminalStart(machine);
     machine?.link.close();
     if (selected?.machineID === forgetID) detach();
     machines.delete(forgetID);
@@ -286,7 +342,7 @@ forgetDialog.addEventListener('close', () => {
 element('detach-session').addEventListener('click', detach);
 sessionReconnect.addEventListener('click', () => terminal?.reconnect());
 screenReader.addEventListener('change', () => terminal?.setScreenReaderMode(screenReader.checked));
-window.addEventListener('pagehide', () => { terminal?.dispose(); machines.forEach((machine) => machine.link.close()); });
+window.addEventListener('pagehide', () => { terminal?.dispose(); machines.forEach((machine) => { clearTerminalStart(machine); machine.link.close(); }); });
 window.addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 
 try {
