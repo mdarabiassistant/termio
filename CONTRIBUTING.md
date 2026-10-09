@@ -93,11 +93,16 @@ groups sessions by machine; select a session to use its terminal on the right.
 **Remember on this browser** is checked; remembered addresses include the pairing
 token. Browser storage for local files may change if the HTML file is moved.
 
-**New Terminal** asks for a session name, prefilled with **New Session**. Use the
-rename button beside an existing session to change its name. Both actions use
-the companion’s `renameSession` request and the daemon’s persistent custom name;
+**New Terminal** asks for a session name, prefilled with **New Session**. Choose
+**Rename** from the three-dot menu beside a session to change its name. Both
+actions use the companion’s `renameSession` request and the daemon’s persistent custom name;
 the dialog waits for the session’s machine to confirm the change. A failed
 confirmation keeps the edit queued, and retrying names the same session.
+
+Choose **Close** from that menu and confirm **Close Session** to stop the session
+on its machine. Renaming or closing a session fetches a fresh session list.
+**Sync Sessions** beside each machine also refreshes its list and keeps the
+active terminal connected.
 
 On phones and tablets, focus the terminal or tap **Keyboard** to show Esc, Tab,
 Ctrl, Alt, arrows, Home, End, and Page Up/Down. Ctrl and Alt apply to the next
