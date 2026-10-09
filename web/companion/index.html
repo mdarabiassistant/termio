@@ -38,6 +38,16 @@
         <div class="dialog-actions"><button type="submit" class="primary">Connect</button></div>
       </form>
     </dialog>
+    <div id="session-menu" class="session-menu" role="menu" aria-label="Session Actions" popover="auto">
+      <button id="menu-rename-session" type="button" role="menuitem">Rename</button>
+      <button id="menu-close-session" type="button" role="menuitem" class="close-menu-item">Close</button>
+    </div>
+    <dialog id="close-session-dialog" aria-labelledby="close-session-title" aria-describedby="close-session-description">
+      <h2 id="close-session-title">Close Session?</h2>
+      <p id="close-session-description"></p>
+      <p id="close-session-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="cancel-close-session" type="button">Cancel</button><button id="confirm-close-session" type="button" class="danger">Close Session</button></div>
+    </dialog>
     <dialog id="session-name-dialog" aria-labelledby="session-name-title">
       <form id="session-name-form">
         <h2 id="session-name-title">New Session</h2>

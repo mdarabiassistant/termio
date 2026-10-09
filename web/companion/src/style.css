@@ -43,7 +43,11 @@ h1 { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; le
 .session-row.selected { background: #2b3731; border-color: #3f5146; }
 .session-item { display: flex; align-items: center; gap: 2px; }
 .session-item .session-row { flex: 1; min-width: 0; width: auto; }
-.rename-session { flex-shrink: 0; font-size: 15px; color: #a5b5ac; }
+.session-menu-button, .sync-machine { flex-shrink: 0; color: #a5b5ac; }
+.session-menu { position: fixed; inset: auto; margin: 0; width: 136px; padding: 4px; color: #dce1df; background: #252a2b; border: 1px solid #424b46; border-radius: 8px; box-shadow: 0 8px 24px #0006; }
+.session-menu button { display: block; width: 100%; border: none; background: none; text-align: left; padding: 9px 12px; }
+.session-menu button:hover, .session-menu button:focus-visible { background: #343a3b; outline-offset: -2px; }
+.session-menu .close-menu-item { color: #f3b7a5; }
 .session-label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .session-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
 .session-detail { font-size: 10px; color: #9ca9a2; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -126,4 +130,6 @@ dialog .field-hint { font-size: 10px; color: #8e9d93; margin: 0 0 20px 27px; }
 
 @media (pointer: coarse) {
   .new-terminal { min-height: 44px; }
+  .session-menu-button, .sync-machine { min-width: 44px; min-height: 44px; }
+  .session-menu button { min-height: 44px; }
 }

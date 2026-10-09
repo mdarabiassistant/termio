@@ -31,11 +31,18 @@ let serverWire = 3;
 let socketEndpoints: Map<WebSocket, string>;
 let socketProjects: Map<WebSocket, typeof projects>;
 let sessionNames: Map<string, Map<string, string>>;
+let endpointProjects: Map<string, typeof projects>;
+let endpointMachines: Map<string, { macID: string; macName: string }>;
+let confirmCloses = true;
+let closeError = '';
 
 function roster(socket: WebSocket, rows = projects): void {
   socketProjects.set(socket, rows);
-  const names = sessionNames.get(socketEndpoints.get(socket) ?? '');
-  socket.send(JSON.stringify({ t: 'roster', wire: serverWire, macID, macName, projects: rows.map((project) => ({
+  const endpoint = socketEndpoints.get(socket) ?? '';
+  endpointProjects.set(endpoint, rows);
+  const names = sessionNames.get(endpoint);
+  const identity = endpointMachines.get(endpoint) ?? { macID, macName };
+  socket.send(JSON.stringify({ t: 'roster', wire: serverWire, ...identity, projects: rows.map((project) => ({
     ...project, sessions: project.sessions.map((session) => ({ ...session, title: names?.get(session.id) ?? session.title })),
   })) }));
 }
@@ -45,6 +52,7 @@ test.beforeEach(async () => {
   macID = 'fixture-mac'; macName = 'Studio Mac'; refuse = false; followViewport = false;
   confirmRenames = true; serverWire = 3;
   socketEndpoints = new Map(); socketProjects = new Map(); sessionNames = new Map();
+  endpointProjects = new Map(); endpointMachines = new Map(); confirmCloses = true; closeError = '';
   server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const binding = server.address();
@@ -73,7 +81,9 @@ test.beforeEach(async () => {
         }
         authenticated = true;
         rosterSockets.add(socket);
-        roster(socket);
+        const endpoint = socketEndpoints.get(socket) ?? '';
+        if (!endpointMachines.has(endpoint)) endpointMachines.set(endpoint, { macID, macName });
+        roster(socket, endpointProjects.get(endpoint) ?? projects);
       } else if (message.t === 'attach') {
         session = message.session;
         rosterSockets.delete(socket);
@@ -95,6 +105,17 @@ test.beforeEach(async () => {
           const rows = socketProjects.get(viewer);
           if (socketEndpoints.get(viewer) === endpoint && rows?.some((project) => project.sessions.some((session) => session.id === message.session))) roster(viewer, rows);
         }
+      } else if (message.t === 'stop') {
+        if (closeError) {
+          socket.send(JSON.stringify({ t: 'error', message: closeError }));
+          return;
+        }
+        if (!confirmCloses) return;
+        const endpoint = socketEndpoints.get(socket) ?? '';
+        const rows = (endpointProjects.get(endpoint) ?? projects).map((project) => ({
+          ...project, sessions: project.sessions.filter((session) => session.id !== message.session),
+        }));
+        for (const viewer of rosterSockets) if (socketEndpoints.get(viewer) === endpoint) roster(viewer, rows);
       }
     });
     socket.on('close', () => { rosterSockets.delete(socket); });
@@ -132,6 +153,11 @@ async function requestTerminal(page: Page, scope: Page | Locator = page, name = 
   }
   await page.getByLabel('Session name', { exact: true }).fill(name);
   await page.getByRole('button', { name: /Create Session|Rename/, exact: true }).last().click();
+}
+
+async function sessionActions(page: Page, title: string, scope: Page | Locator = page): Promise<Locator> {
+  await scope.getByRole('group', { name: title, exact: true }).getByRole('button', { name: 'Session Actions' }).click();
+  return page.getByRole('menu', { name: 'Session Actions' });
 }
 
 test('pairing validation and roster grouping preserve the companion contract', () => {
@@ -350,10 +376,11 @@ test('creates on the chosen Mac and respects a later session selection', async (
   await expect(page.locator('#session-context')).toHaveText('Laptop / This machine');
   await requestTerminal(page, laptop, 'Background shell');
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'startTerminal').length).toBe(2);
+  const secondSocket = controls.filter((entry) => entry.message.t === 'startTerminal')[1].socket;
   await laptop.getByRole('button', { name: /Deployment logs/ }).evaluate((button: HTMLButtonElement) => button.click());
   await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
-  socket.send(JSON.stringify({ t: 'started', session: 'background-terminal' }));
-  roster(socket, [{ ...projects[0], sessions: [{ id: 'background-terminal', title: 'Background shell', agent: 'terminal', status: 'idle' }] }, projects[1]]);
+  secondSocket.send(JSON.stringify({ t: 'started', session: 'background-terminal' }));
+  roster(secondSocket, [{ ...projects[0], sessions: [{ id: 'background-terminal', title: 'Background shell', agent: 'terminal', status: 'idle' }] }, projects[1]]);
   await expect(laptop.getByRole('button', { name: /Background shell/ })).toBeVisible();
   await expect(page.locator('#session-title')).toHaveText('Deployment logs');
   expect(sessionSockets.has('background-terminal')).toBe(false);
@@ -424,12 +451,204 @@ test('names a new session through rename and waits for confirmation before openi
   await page.screenshot({ path: testInfo.outputPath('named-session-desktop.png') });
 });
 
+test('session actions open beside the row and support keyboard and outside dismissal', async ({ page }, testInfo) => {
+  await openShell(page);
+  const row = page.getByRole('group', { name: 'Deployment logs', exact: true });
+  const trigger = row.getByRole('button', { name: 'Session Actions' });
+  const menu = await sessionActions(page, 'Deployment logs');
+  await expect(menu.getByRole('menuitem')).toHaveText(['Rename', 'Close']);
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  const anchorBounds = await trigger.boundingBox();
+  const menuBounds = await menu.boundingBox();
+  expect(anchorBounds && menuBounds && Math.abs(menuBounds.y - anchorBounds.y - anchorBounds.height) < 10).toBe(true);
+  await expect(menu.getByRole('menuitem', { name: 'Rename' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: 'Close', exact: true })).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('session-actions.png') });
+  await page.keyboard.press('Escape');
+  await expect(menu).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await page.locator('#session-title').click();
+  await expect(menu).not.toBeVisible();
+  expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+});
+
+test('closing a remote session requires confirmation and refetches the roster without replacing another terminal', async ({ page }, testInfo) => {
+  await openShell(page);
+  const attached = sessionSockets.get('shell');
+  const surface = await page.locator('.xterm').elementHandle();
+  const before = await terminalText(page);
+  const close = async () => {
+    await (await sessionActions(page, 'Deployment logs')).getByRole('menuitem', { name: 'Close', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Close Session?' })).toBeVisible();
+  };
+  await close();
+  await expect(page.locator('#close-session-description')).toContainText('Deployment logs');
+  expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath('close-session-confirmation.png') });
+  await page.locator('#cancel-close-session').click();
+  expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+  await close();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#close-session-dialog')).not.toBeVisible();
+  expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+  await close();
+  const beforeAuthentication = controls.filter((entry) => entry.message.t === 'auth').length;
+  await page.locator('#confirm-close-session').click();
+  await expect(page.locator('#close-session-dialog')).not.toBeVisible();
+  await expect(page.getByRole('group', { name: 'Deployment logs', exact: true })).not.toBeVisible();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'auth').length).toBe(beforeAuthentication + 1);
+  const requests = controls.filter((entry) => entry.message.t === 'stop');
+  expect(requests).toHaveLength(1);
+  expect(requests[0].message).toEqual({ t: 'stop', session: 'remote-shell' });
+  expect(requests[0].socket).not.toBe(attached);
+  expect(sessionSockets.get('shell')).toBe(attached);
+  expect(attached?.readyState).toBe(WebSocket.OPEN);
+  expect(await surface?.evaluate((element) => element.isConnected)).toBe(true);
+  expect(await terminalText(page)).toBe(before);
+  await page.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('still running');
+  await expect.poll(() => Buffer.concat(inputs.map((input) => input.bytes)).toString()).toBe('still running');
+});
+
+test('closing the selected session clears its pane after the roster confirms removal', async ({ page }) => {
+  confirmCloses = false;
+  await openShell(page);
+  await (await sessionActions(page, 'Local shell')).getByRole('menuitem', { name: 'Close', exact: true }).click();
+  await page.locator('#confirm-close-session').click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'stop').length).toBe(1);
+  await expect(page.locator('#confirm-close-session')).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#close-session-dialog')).toBeVisible();
+  await expect(page.locator('#terminal-viewport')).toBeVisible();
+  const request = controls.find((entry) => entry.message.t === 'stop')!;
+  roster(request.socket, [{ ...projects[0], sessions: [projects[0].sessions[1]] }, projects[1]]);
+  await expect(page.locator('#close-session-dialog')).not.toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Select a session' })).toBeVisible();
+  expect(controls.filter((entry) => entry.message.t === 'stop')).toHaveLength(1);
+});
+
+test('close errors, timeouts and disconnects keep the session and never replay the close', async ({ page }) => {
+  closeError = 'The remote machine refused the close.';
+  await page.clock.install();
+  await openShell(page);
+  const attached = sessionSockets.get('shell');
+  await (await sessionActions(page, 'Deployment logs')).getByRole('menuitem', { name: 'Close', exact: true }).click();
+  await page.locator('#confirm-close-session').click();
+  await expect(page.locator('#close-session-error')).toHaveText(closeError);
+  await expect(page.locator('#confirm-close-session')).toBeEnabled();
+  closeError = ''; confirmCloses = false;
+  await page.locator('#confirm-close-session').click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'stop').length).toBe(2);
+  await page.clock.fastForward(15001);
+  await expect(page.locator('#close-session-error')).toContainText('didn’t confirm the close');
+  await expect(page.locator('#confirm-close-session')).toBeEnabled();
+  await page.locator('#confirm-close-session').click();
+  await expect.poll(() => controls.filter((entry) => entry.message.t === 'stop').length).toBe(3);
+  const request = controls.filter((entry) => entry.message.t === 'stop').at(-1)!;
+  request.socket.terminate();
+  await expect(page.locator('#close-session-error')).toContainText('Connection lost');
+  await page.clock.fastForward(1001);
+  await expect(page.locator('#confirm-close-session')).toBeEnabled();
+  expect(controls.filter((entry) => entry.message.t === 'stop')).toHaveLength(3);
+  expect(sessionSockets.get('shell')).toBe(attached);
+  await expect(page.getByRole('group', { name: 'Deployment logs', exact: true })).toBeVisible();
+});
+
+test('sync refreshes changed and empty rosters while leaving the active terminal intact', async ({ page }) => {
+  await openShell(page);
+  const attached = sessionSockets.get('shell');
+  const surface = await page.locator('.xterm').elementHandle();
+  const before = await terminalText(page);
+  const endpoint = socketEndpoints.get(attached!) ?? '';
+  sessionNames.set(endpoint, new Map([['shell', 'Renamed elsewhere']]));
+  endpointProjects.set(endpoint, [{ ...projects[0], sessions: [projects[0].sessions[0], { id: 'new-shell', title: 'Created elsewhere', agent: 'terminal', status: 'idle' }] }]);
+  const beforeAttach = controls.filter((entry) => entry.message.t === 'attach').length;
+  await page.getByRole('button', { name: 'Sync Studio Mac', exact: true }).click();
+  await expect(page.getByRole('group', { name: 'Renamed elsewhere', exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Created elsewhere', exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Deployment logs', exact: true })).not.toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sync Studio Mac', exact: true })).toBeEnabled();
+  endpointProjects.set(endpoint, []);
+  await page.getByRole('button', { name: 'Sync Studio Mac', exact: true }).click();
+  await expect(page.locator('.session-item')).toHaveCount(0);
+  await expect(page.locator('#terminal-viewport')).toBeVisible();
+  expect(await surface?.evaluate((element) => element.isConnected)).toBe(true);
+  expect(await terminalText(page)).toBe(before);
+  expect(sessionSockets.get('shell')).toBe(attached);
+  expect(controls.filter((entry) => entry.message.t === 'attach')).toHaveLength(beforeAttach);
+  await page.locator('.xterm-helper-textarea').focus();
+  await page.keyboard.type('unchanged');
+  await expect.poll(() => Buffer.concat(inputs.map((input) => input.bytes)).toString()).toBe('unchanged');
+});
+
+test('sync and close target only the chosen machine when session IDs overlap', async ({ page }) => {
+  await openShell(page);
+  macID = 'laptop'; macName = 'Laptop';
+  await pair(page, address.replace('/?', '/second?'));
+  const laptop = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Laptop' }) });
+  const studio = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Studio Mac' }) });
+  sessionNames.set('/second', new Map([['shell', 'Laptop work']]));
+  await page.getByRole('button', { name: 'Sync Laptop', exact: true }).click();
+  await expect(laptop.getByRole('group', { name: 'Laptop work', exact: true })).toBeVisible();
+  await expect(studio.getByRole('group', { name: 'Local shell', exact: true })).toBeVisible();
+  await (await sessionActions(page, 'Laptop work', laptop)).getByRole('menuitem', { name: 'Close', exact: true }).click();
+  await page.locator('#confirm-close-session').click();
+  await expect(laptop.getByRole('group', { name: 'Laptop work', exact: true })).not.toBeVisible();
+  await expect(studio.getByRole('group', { name: 'Local shell', exact: true })).toBeVisible();
+  expect(socketEndpoints.get(controls.find((entry) => entry.message.t === 'stop')!.socket)).toBe('/second');
+  await expect(page.locator('#session-title')).toHaveText('Local shell');
+  expect(sessionSockets.get('shell')?.readyState).toBe(WebSocket.OPEN);
+});
+
+test('a failed sync can be retried without disconnecting the terminal', async ({ page }) => {
+  await openShell(page);
+  const attached = sessionSockets.get('shell');
+  refuse = true;
+  await page.getByRole('button', { name: 'Sync Studio Mac', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('pairing token was refused');
+  await expect(page.getByRole('button', { name: 'Sync Studio Mac', exact: true })).toBeEnabled();
+  await expect(page.locator('#session-status')).toHaveText('Connected');
+  expect(attached?.readyState).toBe(WebSocket.OPEN);
+  refuse = false;
+  endpointProjects.set(socketEndpoints.get(attached!) ?? '', []);
+  await page.getByRole('button', { name: 'Sync Studio Mac', exact: true }).click();
+  await expect(page.locator('.session-item')).toHaveCount(0);
+  await expect(page.getByRole('alert')).not.toBeVisible();
+  expect(sessionSockets.get('shell')).toBe(attached);
+});
+
+test.describe('session controls on touch', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  test('session actions work on a narrow touch screen', async ({ page }, testInfo) => {
+    await page.goto('./index.html');
+    await pair(page);
+    const row = page.getByRole('group', { name: 'Deployment logs', exact: true });
+    await row.getByRole('button', { name: 'Session Actions' }).tap();
+    const menu = page.getByRole('menu', { name: 'Session Actions' });
+    const bounds = await menu.boundingBox();
+    expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390 && bounds.y + bounds.height <= 844).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('session-actions-touch.png') });
+    await menu.getByRole('menuitem', { name: 'Rename', exact: true }).tap();
+    await expect(page.getByLabel('Session name', { exact: true })).toHaveValue('Deployment logs');
+    await page.locator('#cancel-session-name').tap();
+    await row.getByRole('button', { name: 'Session Actions' }).tap();
+    await menu.getByRole('menuitem', { name: 'Close', exact: true }).tap();
+    await expect(page.locator('#close-session-dialog')).toBeVisible();
+    await page.locator('#cancel-close-session').tap();
+    expect(controls.some((entry) => entry.message.t === 'stop')).toBe(false);
+    await page.getByRole('button', { name: 'Sync Studio Mac', exact: true }).tap();
+    await expect(page.getByRole('button', { name: 'Sync Studio Mac', exact: true })).toBeEnabled();
+  });
+});
+
 test('renames an existing remote session without replacing its terminal and receives later name updates', async ({ page }) => {
   await openShell(page);
   await page.getByRole('button', { name: /Deployment logs/ }).click();
   await expect.poll(() => terminalText(page)).toContain('remote-shell ready');
   const attached = sessionSockets.get('remote-shell');
-  await page.getByRole('group', { name: 'Deployment logs', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await (await sessionActions(page, 'Deployment logs')).getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await expect(page.getByLabel('Session name', { exact: true })).toHaveValue('Deployment logs');
   await page.getByLabel('Session name', { exact: true }).fill('Remote deployment λ');
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
@@ -437,7 +656,8 @@ test('renames an existing remote session without replacing its terminal and rece
   await expect(page.locator('#session-title')).toHaveText('Remote deployment λ');
   const request = controls.find((entry) => entry.message.t === 'renameSession')!;
   expect(request.message).toMatchObject({ session: 'remote-shell', name: 'Remote deployment λ' });
-  expect(rosterSockets.has(request.socket)).toBe(true);
+  expect(request.socket).not.toBe(attached);
+  await expect.poll(() => request.socket.readyState).toBe(WebSocket.CLOSED);
   expect(sessionSockets.get('remote-shell')).toBe(attached);
   await page.locator('.xterm-helper-textarea').focus();
   await page.keyboard.type('still running');
@@ -480,7 +700,7 @@ test('times out a rename and ignores its late confirmation without replaying it'
   await page.clock.install();
   await openShell(page);
   const attached = sessionSockets.get('shell');
-  await page.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await (await sessionActions(page, 'Local shell')).getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('Session name', { exact: true }).fill('Timed-out name');
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
@@ -498,7 +718,7 @@ test('reconnects after a pending rename without replay and keeps the confirmed n
   confirmRenames = false;
   await page.goto('./index.html');
   await pair(page, address, true);
-  await page.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await (await sessionActions(page, 'Local shell')).getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('Session name', { exact: true }).fill('Persistent name');
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   await expect.poll(() => controls.filter((entry) => entry.message.t === 'renameSession').length).toBe(1);
@@ -520,7 +740,7 @@ test('names the session on the chosen Mac without changing an identical session 
   macID = 'laptop'; macName = 'Laptop';
   await pair(page, address.replace('/?', '/second?'));
   const laptop = page.locator('.paired-machine').filter({ has: page.getByRole('heading', { name: 'Laptop' }) });
-  await laptop.getByRole('group', { name: 'Local shell', exact: true }).getByRole('button', { name: 'Rename Session' }).click();
+  await (await sessionActions(page, 'Local shell', laptop)).getByRole('menuitem', { name: 'Rename', exact: true }).click();
   await page.getByLabel('Session name', { exact: true }).fill('Laptop work');
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   await expect(laptop.getByRole('button', { name: /Laptop work/ })).toBeVisible();
