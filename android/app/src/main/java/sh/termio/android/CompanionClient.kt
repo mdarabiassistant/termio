@@ -38,6 +38,7 @@ data class CompanionState(
     val connected: Boolean = false,
     val hasRoster: Boolean = false,
     val loadingRoster: Boolean = false,
+    val refreshingRoster: Boolean = false,
     val projects: List<RemoteProject> = emptyList(),
     val session: RemoteSession? = null,
     val terminal: GhosttyTerminalSession? = null,
@@ -57,7 +58,7 @@ data class HomeState(
     val pairingError: String = "",
 ) {
     val refreshingSessions: Boolean
-        get() = machines.any { it.connection.loadingRoster }
+        get() = machines.any { it.connection.refreshingRoster }
 
     val selectedConnection: CompanionState?
         get() = machines.firstOrNull { it.machine.id == selectedMachineID }?.connection
@@ -227,6 +228,7 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
 
     private fun addLink(machine: PairedMachine) {
         val connection = MacConnection(getApplication(), client)
+        connection.setAppForeground(foreground)
         val link = MachineLink(machine, connection)
         links[machine.id] = link
         connection.onStarted = { session ->
@@ -330,7 +332,10 @@ class CompanionClient(application: Application) : AndroidViewModel(application) 
 
     fun setForeground(visible: Boolean) {
         foreground = visible
-        links.values.forEach { it.connection.setForeground(visible && it.machine.id == state.value.selectedMachineID) }
+        links.values.forEach {
+            it.connection.setForeground(visible && it.machine.id == state.value.selectedMachineID)
+            it.connection.setAppForeground(visible)
+        }
     }
 
     override fun onCleared() {
@@ -349,13 +354,18 @@ private class MacConnection(private val application: Application, private val cl
     private var rosterSocket: WebSocket? = null
     private var sessionSocket: WebSocket? = null
     private var foreground = false
+    private var appForeground = false
+    private var sessionFinished = false
+    private var rosterRetryDelay = 1000L
+    private var sessionRetryDelay = 1000L
     private var sessionAuthenticated = false
     private var applyingSharedGrid = false
     private var viewportColumns = 80
     private var viewportRows = 24
     private var cellWidthPixels = 0
     private var cellHeightPixels = 0
-    private val retrySession = Runnable { if (state.value.session != null) dialSession() }
+    private val retryRoster = Runnable { if (appForeground && pairing != null) dialRoster() }
+    private val retrySession = Runnable { if (appForeground && !sessionFinished && state.value.session != null) dialSession() }
     private val rosterTimeout = Runnable {
         if (state.value.loadingRoster && rosterSocket != null) rosterDisconnected(rosterSocket)
     }
@@ -367,25 +377,36 @@ private class MacConnection(private val application: Application, private val cl
         }
         stopConnections()
         pairing = parsed
+        rosterRetryDelay = 1000L
+        sessionRetryDelay = 1000L
         mutableState.value = CompanionState(address = parsed.url, status = "Connecting…")
-        dialRoster()
+        if (appForeground) dialRoster()
     }
 
     fun refreshRoster(address: String) {
-        if (state.value.loadingRoster) return
-        if (pairing == null) connect(address) else dialRoster()
+        if (!appForeground || state.value.refreshingRoster) return
+        if (pairing == null) connect(address)
+        if (pairing == null) return
+        mutableState.update { it.copy(refreshingRoster = true,
+            status = if (it.hasRoster) "Refreshing…" else "Connecting…", error = "") }
+        if (!state.value.loadingRoster) dialRoster()
     }
 
     private fun dialRoster() {
+        if (!appForeground) return
         val address = pairing ?: return
+        handler.removeCallbacks(retryRoster)
         handler.removeCallbacks(rosterTimeout)
         // A new authenticated connection requests the Mac's complete current roster.
         // Keep the displayed snapshot and the independent terminal connection intact.
         val previous = rosterSocket
         rosterSocket = null
         previous?.cancel()
-        mutableState.update { it.copy(status = if (it.hasRoster) "Refreshing…" else "Connecting…",
-            loadingRoster = true, error = "") }
+        mutableState.update { it.copy(status = when {
+            it.refreshingRoster -> "Refreshing…"
+            it.hasRoster -> "Reconnecting…"
+            else -> "Connecting…"
+        }, loadingRoster = true, error = if (it.refreshingRoster) "" else it.error) }
         rosterSocket = client.newWebSocket(Request.Builder().url(address.url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 handler.post { if (webSocket === rosterSocket) webSocket.send(CompanionProtocol.authentication(address.token)) }
@@ -416,7 +437,8 @@ private class MacConnection(private val application: Application, private val cl
                     return
                 }
                 handler.removeCallbacks(rosterTimeout)
-                mutableState.update { it.copy(hasRoster = true, loadingRoster = false,
+                rosterRetryDelay = 1000L
+                mutableState.update { it.copy(hasRoster = true, loadingRoster = false, refreshingRoster = false,
                     connected = true, status = "Connected", error = "",
                     macName = if (message.isNull("macName")) "" else message.optString("macName"),
                     macID = if (message.isNull("macID")) "" else message.optString("macID"),
@@ -438,9 +460,16 @@ private class MacConnection(private val application: Application, private val cl
 
     private fun rosterDisconnected(socket: WebSocket?) {
         if (socket !== rosterSocket || pairing == null) return
-        stopConnections()
-        mutableState.update { it.copy(connected = false, status = "",
-            error = "Couldn’t connect to this Mac. Check Mobile Access on your Mac, then tap Retry.") }
+        handler.removeCallbacks(rosterTimeout)
+        rosterSocket = null
+        socket?.cancel()
+        mutableState.update { it.copy(connected = false, loadingRoster = false, refreshingRoster = false, status = "Reconnecting…",
+            error = "Couldn’t connect to this Mac. Reconnecting…") }
+        handler.removeCallbacks(retryRoster)
+        if (appForeground) {
+            handler.postDelayed(retryRoster, rosterRetryDelay)
+            rosterRetryDelay = (rosterRetryDelay * 2).coerceAtMost(30_000L)
+        }
     }
 
     fun startTerminal() {
@@ -453,11 +482,13 @@ private class MacConnection(private val application: Application, private val cl
 
     fun openSession(session: RemoteSession) {
         leaveSession()
+        sessionRetryDelay = 1000L
         mutableState.update { it.copy(session = session, sessionStatus = "Connecting…") }
         dialSession()
     }
 
     private fun dialSession() {
+        if (!appForeground || sessionFinished) return
         val address = pairing ?: return
         val selected = state.value.session ?: return
         handler.removeCallbacks(retrySession)
@@ -515,7 +546,10 @@ private class MacConnection(private val application: Application, private val cl
             "roster" -> {
                 if (message.optInt("wire") < CompanionProtocol.wireVersion) {
                     finishSession("Update Termio on your Mac to connect this phone.")
-                } else mutableState.update { it.copy(sessionReady = true, sessionStatus = "Connected") }
+                } else {
+                    sessionRetryDelay = 1000L
+                    mutableState.update { it.copy(sessionReady = true, sessionStatus = "Connected") }
+                }
             }
             "grid" -> {
                 val columns = message.optInt("cols")
@@ -544,13 +578,17 @@ private class MacConnection(private val application: Application, private val cl
 
     private fun sessionDisconnected(socket: WebSocket) {
         if (socket !== sessionSocket || state.value.session == null) return
-        sessionAuthenticated = false
+        closeSessionSocket()
         mutableState.update { it.copy(sessionReady = false, sessionStatus = "Reconnecting…") }
         handler.removeCallbacks(retrySession)
-        handler.postDelayed(retrySession, 2500)
+        if (appForeground && !sessionFinished) {
+            handler.postDelayed(retrySession, sessionRetryDelay)
+            sessionRetryDelay = (sessionRetryDelay * 2).coerceAtMost(30_000L)
+        }
     }
 
     private fun finishSession(status: String) {
+        sessionFinished = true
         handler.removeCallbacks(retrySession)
         closeSessionSocket()
         state.value.terminal?.finish()
@@ -566,6 +604,33 @@ private class MacConnection(private val application: Application, private val cl
         reportViewport()
     }
 
+    fun setAppForeground(visible: Boolean) {
+        val changed = appForeground != visible
+        appForeground = visible
+        if (!visible) {
+            if (!changed) return
+            handler.removeCallbacks(rosterTimeout)
+            handler.removeCallbacks(retryRoster)
+            handler.removeCallbacks(retrySession)
+            closeSessionSocket()
+            val socket = rosterSocket
+            rosterSocket = null
+            socket?.cancel()
+            // Background suspension must retain the pairing and selected session.
+            mutableState.update { it.copy(connected = false, loadingRoster = false, refreshingRoster = false,
+                sessionReady = false, status = "", error = if (pairing != null) "" else it.error,
+                sessionStatus = if (it.session != null && !sessionFinished) "Reconnecting…" else it.sessionStatus) }
+            return
+        }
+        if (pairing == null) return
+        if (changed) {
+            rosterRetryDelay = 1000L
+            sessionRetryDelay = 1000L
+        }
+        if (rosterSocket == null) dialRoster()
+        if (sessionSocket == null && state.value.session != null && !sessionFinished) dialSession()
+    }
+
     private fun reportViewport(rendering: Boolean = foreground) {
         val terminal = state.value.terminal ?: return
         if (!sessionAuthenticated || viewportColumns < 1 || viewportRows < 1) return
@@ -574,6 +639,7 @@ private class MacConnection(private val application: Application, private val cl
     }
 
     fun leaveSession() {
+        sessionFinished = false
         handler.removeCallbacks(retrySession)
         reportViewport(false)
         closeSessionSocket()
@@ -590,13 +656,14 @@ private class MacConnection(private val application: Application, private val cl
 
     private fun stopConnections() {
         handler.removeCallbacks(rosterTimeout)
+        handler.removeCallbacks(retryRoster)
         handler.removeCallbacks(retrySession)
         leaveSession()
         pairing = null
         val socket = rosterSocket
         rosterSocket = null
         socket?.cancel()
-        mutableState.update { it.copy(loadingRoster = false) }
+        mutableState.update { it.copy(loadingRoster = false, refreshingRoster = false) }
     }
 
     private fun decode(text: String): JSONObject? = try { JSONObject(text) } catch (error: Exception) {

@@ -7,6 +7,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -22,7 +23,10 @@ import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.swipeUp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -38,6 +42,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import okio.ByteString
 
 class MachineSectionsTest {
     @get:Rule val compose = createEmptyComposeRule()
@@ -45,6 +50,7 @@ class MachineSectionsTest {
     private val preferences = context.getSharedPreferences("companion", Context.MODE_PRIVATE)
     private val servers = mutableListOf<MockWebServer>()
     private val messages = ConcurrentLinkedQueue<Pair<MockWebServer, JSONObject>>()
+    private val inputs = ConcurrentLinkedQueue<Pair<MockWebServer, ByteString>>()
     private lateinit var savedPreferences: Map<String, *>
     private lateinit var first: MockWebServer
     private lateinit var second: MockWebServer
@@ -81,6 +87,67 @@ class MachineSectionsTest {
                 }
             }
         }.commit()
+    }
+
+    @Test
+    fun activityReturnKeepsSessionAndReconnectsAllMacsWithoutResendingPrompt() {
+        var observedClient: CompanionClient? = null
+        scenario.onActivity { observedClient = ViewModelProvider(it)[CompanionClient::class.java] }
+        val client = requireNotNull(observedClient)
+        compose.onNodeWithText("First session").performClick()
+        compose.waitUntil(10_000) {
+            client.state.value.machines.all { it.connection.connected } &&
+                client.state.value.selectedConnection?.sessionReady == true
+        }
+        scenario.onActivity { client.state.value.selectedConnection?.terminal?.transport?.sendInput("test prompt\r".toByteArray()) }
+        compose.waitUntil(10_000) { inputs.any { (server, bytes) -> server === first && bytes.utf8() == "test prompt\r" } }
+
+        repeat(3) { cycle ->
+            messages.clear()
+            scenario.moveToState(Lifecycle.State.CREATED)
+            assertEquals("First session", client.state.value.selectedConnection?.session?.id)
+            assertTrue(client.state.value.machines.all { !it.connection.connected })
+            Thread.sleep(2_000)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            compose.waitUntil(10_000) {
+                client.state.value.machines.all { it.connection.connected } &&
+                    client.state.value.selectedConnection?.sessionReady == true &&
+                    messages.any { (server, message) -> server === first &&
+                        message.optString("t") == "attach" && message.optString("session") == "First session" }
+            }
+            compose.onNodeWithContentDescription("Back").assertIsDisplayed()
+            assertEquals("First session", client.state.value.selectedConnection?.session?.id)
+            assertEquals(2 + (cycle + 1) * 2, first.requestCount)
+            assertEquals(2 + cycle, second.requestCount)
+            assertEquals(1, inputs.size)
+        }
+    }
+
+    @Test
+    fun refreshButtonStopsSpinningWhileAnUnavailableMacReconnects() {
+        var observedClient: CompanionClient? = null
+        scenario.onActivity { observedClient = ViewModelProvider(it)[CompanionClient::class.java] }
+        val client = requireNotNull(observedClient)
+        compose.waitUntil(10_000) { client.state.value.machines.all { it.connection.connected } }
+        val authentications = AtomicInteger()
+        second.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        if (JSONObject(text).optString("t") == "auth") authentications.incrementAndGet()
+                    }
+                })
+        }
+
+        compose.onNodeWithText("Refresh").performClick().assertIsNotEnabled()
+        compose.waitUntil(22_000) { !client.state.value.refreshingSessions &&
+            client.state.value.machines.single { it.machine.id == "second" }.connection.error.isNotEmpty() }
+        compose.waitUntil(10_000) { authentications.get() >= 2 }
+        compose.onNodeWithText("Refresh").assertIsEnabled().assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Refreshing sessions").not())
+        compose.onNodeWithText("First session").performClick()
+        compose.waitUntil(10_000) { client.state.value.selectedConnection?.sessionReady == true }
+        compose.onNodeWithContentDescription("Back").assertIsDisplayed()
     }
 
     @Test
@@ -308,6 +375,9 @@ class MachineSectionsTest {
                         val message = JSONObject(text)
                         messages.add(server to message)
                         if (message.optString("t") == "auth") webSocket.send(snapshot.get())
+                    }
+                    override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                        inputs.add(server to bytes)
                     }
                 })
         }
