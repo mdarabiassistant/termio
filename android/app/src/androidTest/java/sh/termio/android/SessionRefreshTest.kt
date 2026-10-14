@@ -21,6 +21,7 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import okio.ByteString
 
 class SessionRefreshTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -39,6 +40,7 @@ class SessionRefreshTest {
         onMain {
             client = CompanionClient(application)
             store.put("client", client)
+            client.setForeground(true)
         }
     }
 
@@ -147,6 +149,56 @@ class SessionRefreshTest {
     }
 
     @Test
+    fun offlineMacRetriesDoNotRestartRefreshAfterTimeout() {
+        val first = server()
+        val second = server()
+        first.roster(roster("first", "old-first"))
+        second.roster(roster("second", "old-second"))
+        connect(first)
+        connect(second)
+        awaitState { it.machines.size == 2 && it.machines.all { machine -> machine.connection.connected } }
+
+        first.roster(roster("first", "new-first"))
+        val unresponsive = second.roster()
+        val reconnect = second.roster()
+        onMain { client.refreshSessions() }
+        unresponsive.authenticatedSocket()
+        val timedOut = awaitState(22_000) {
+            !it.refreshingSessions && it.machines.any { machine -> machine.connection.macID == "second" &&
+                machine.connection.error.isNotEmpty() }
+        }
+        assertEquals(listOf("new-first", "old-second"), timedOut.sessions())
+
+        val retrySocket = reconnect.authenticatedSocket()
+        val retrying = awaitState { it.machines.any { machine -> machine.connection.macID == "second" &&
+            machine.connection.loadingRoster } }
+        assertFalse("Automatic reconnect must not restart the refresh spinner", retrying.refreshingSessions)
+        assertTrue(retrying.machines.single { it.connection.macID == "first" }.connection.connected)
+        assertEquals(listOf("new-first", "old-second"), retrying.sessions())
+
+        retrySocket.send(roster("second", "recovered-second"))
+        awaitState { !it.refreshingSessions && it.sessions() == listOf("new-first", "recovered-second") }
+    }
+
+    @Test
+    fun explicitRefreshCanWaitForAnAutomaticConnectionAlreadyInProgress() {
+        val server = server()
+        server.enqueue(MockResponse().setResponseCode(503))
+        val reconnect = server.roster()
+        connect(server)
+        awaitState { it.machines.singleOrNull()?.connection?.error?.isNotEmpty() == true }
+        val retrySocket = reconnect.authenticatedSocket()
+        onMain {
+            client.refreshSessions()
+            assertTrue(client.state.value.refreshingSessions)
+            client.refreshSessions()
+        }
+        assertEquals(2, server.requestCount)
+        retrySocket.send(roster("mac", "recovered"))
+        awaitState { !it.refreshingSessions && it.sessions() == listOf("recovered") }
+    }
+
+    @Test
     fun refreshingRosterLeavesTheTerminalConnectionIntact() {
         val server = server()
         server.roster(roster("mac", "terminal"))
@@ -168,6 +220,139 @@ class SessionRefreshTest {
         assertEquals(3, server.requestCount)
     }
 
+    @Test
+    fun returningAfterBackgroundDisconnectReattachesTheSameSessionWithoutRetry() {
+        val server = server()
+        val originalRoster = server.roster(roster("mac", "terminal"))
+        connect(server)
+        val initial = awaitState { it.sessions() == listOf("terminal") }
+        val originalTerminal = server.roster(roster("mac", "terminal"))
+        onMain { client.openSession(initial.machines.single().machine.id, RemoteSession("terminal", "Terminal")) }
+        val attached = awaitState { it.selectedConnection?.sessionReady == true }
+        onMain { attached.selectedConnection?.terminal?.transport?.sendInput("test prompt\r".toByteArray()) }
+        assertEquals("test prompt\r", originalTerminal.inputs.poll(10, TimeUnit.SECONDS)?.utf8())
+
+        onMain { client.setForeground(false) }
+        originalRoster.authenticatedSocket().close(1001, "background test")
+        originalTerminal.authenticatedSocket().close(1001, "background test")
+        val background = awaitState { it.machines.single().connection.connected == false }
+        assertEquals("terminal", background.selectedConnection?.session?.id)
+        assertEquals(initial.machines.single().machine.id, background.selectedMachineID)
+
+        val attachments = LinkedBlockingQueue<String>()
+        server.roster(roster("mac", "terminal"), attachments)
+        server.roster(roster("mac", "terminal"), attachments)
+        onMain { client.setForeground(true) }
+        val recovered = awaitState { it.selectedConnection?.sessionReady == true && it.machines.single().connection.connected }
+        assertEquals("terminal", recovered.selectedConnection?.session?.id)
+        assertEquals("terminal", attachments.poll(10, TimeUnit.SECONDS))
+        assertNull(attachments.poll())
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test
+    fun repeatedBackgroundReturnsReconnectEverySavedMacWithoutDuplicateConnections() {
+        val first = server()
+        val second = server()
+        first.roster(roster("first", "one"))
+        second.roster(roster("second", "two"))
+        connect(first)
+        connect(second)
+        awaitState { it.machines.size == 2 && it.machines.all { machine -> machine.connection.connected } }
+
+        repeat(3) { cycle ->
+            onMain { client.setForeground(false) }
+            val background = awaitState { it.machines.all { machine -> !machine.connection.connected } }
+            assertEquals(listOf("one", "two"), background.sessions())
+            first.roster(roster("first", "one"))
+            second.roster(roster("second", "two"))
+            onMain { client.setForeground(true) }
+            awaitState { it.machines.all { machine -> machine.connection.connected } }
+            onMain { client.setForeground(true) }
+            assertEquals(cycle + 2, first.requestCount)
+            assertEquals(cycle + 2, second.requestCount)
+        }
+    }
+
+    @Test
+    fun temporaryRosterFailureRecoversWithoutRetry() {
+        val server = server()
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.roster(roster("mac", "recovered"))
+        connect(server)
+        awaitState { it.machines.singleOrNull()?.connection?.error?.isNotEmpty() == true }
+        val recovered = awaitState { it.machines.single().connection.connected }
+        assertEquals(listOf("recovered"), recovered.sessions())
+        assertEquals("", recovered.machines.single().connection.error)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun foregroundRosterLossDoesNotDiscardTheLiveTerminal() {
+        val server = server()
+        val originalRoster = server.roster(roster("mac", "terminal"))
+        connect(server)
+        val initial = awaitState { it.sessions() == listOf("terminal") }
+        server.roster(roster("mac", "terminal"))
+        onMain { client.openSession(initial.machines.single().machine.id, RemoteSession("terminal", "Terminal")) }
+        val attached = awaitState { it.selectedConnection?.sessionReady == true }
+        val terminal = attached.selectedConnection?.terminal
+        server.roster(roster("mac", "terminal", "new"))
+        originalRoster.authenticatedSocket().close(1001, "roster disconnected")
+        val disconnected = awaitState { !it.machines.single().connection.connected }
+        assertTrue(disconnected.selectedConnection?.sessionReady == true)
+        assertSame(terminal, disconnected.selectedConnection?.terminal)
+        val recovered = awaitState { it.machines.single().connection.connected && it.sessions().contains("new") }
+        assertSame(terminal, recovered.selectedConnection?.terminal)
+        assertEquals("terminal", recovered.selectedConnection?.session?.id)
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun unauthorizedConnectionRequiresExplicitRetryAfterReturning() {
+        val server = server()
+        server.roster("""{"t":"error","code":"unauthorized"}""")
+        connect(server)
+        val failed = awaitState { it.machines.singleOrNull()?.connection?.error?.contains("Scan") == true }
+        assertNotNull(server.takeRequest(10, TimeUnit.SECONDS))
+        onMain { client.setForeground(false); client.setForeground(true) }
+        assertNull(server.takeRequest(1500, TimeUnit.MILLISECONDS))
+        assertEquals(failed.machines.single().connection.error, client.state.value.machines.single().connection.error)
+    }
+
+    @Test
+    fun endedSessionIsNotReattachedOnReturn() {
+        val server = server()
+        server.roster(roster("mac", "terminal"))
+        connect(server)
+        val initial = awaitState { it.sessions() == listOf("terminal") }
+        val terminal = server.roster(roster("mac", "terminal"))
+        onMain { client.openSession(initial.machines.single().machine.id, RemoteSession("terminal", "Terminal")) }
+        awaitState { it.selectedConnection?.sessionReady == true }
+        terminal.authenticatedSocket().send("""{"t":"exit"}""")
+        awaitState { it.selectedConnection?.sessionStatus == "Ended" }
+        onMain { client.setForeground(false) }
+        val attachments = LinkedBlockingQueue<String>()
+        server.roster(roster("mac", "terminal"), attachments)
+        onMain { client.setForeground(true) }
+        val returned = awaitState { it.machines.single().connection.connected }
+        assertEquals("Ended", returned.selectedConnection?.sessionStatus)
+        assertNull(attachments.poll(1500, TimeUnit.MILLISECONDS))
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun deletingAMacCancelsItsPendingReconnect() {
+        val server = server()
+        server.enqueue(MockResponse().setResponseCode(503))
+        connect(server)
+        val failed = awaitState { it.machines.singleOrNull()?.connection?.error?.isNotEmpty() == true }
+        assertNotNull(server.takeRequest(10, TimeUnit.SECONDS))
+        onMain { client.deleteMachine(failed.machines.single().machine.id) }
+        assertNull(server.takeRequest(1500, TimeUnit.MILLISECONDS))
+        assertTrue(client.state.value.machines.isEmpty())
+    }
+
     private fun server() = MockWebServer().also { it.start(); servers.add(it) }
 
     private fun connect(server: MockWebServer) {
@@ -175,14 +360,20 @@ class SessionRefreshTest {
         onMain { client.connect(address) }
     }
 
-    private class RosterReply(val message: String?) : WebSocketListener() {
+    private class RosterReply(val message: String?, val attachments: LinkedBlockingQueue<String>) : WebSocketListener() {
         val authentications = LinkedBlockingQueue<Pair<WebSocket, JSONObject>>()
+        val inputs = LinkedBlockingQueue<ByteString>()
         override fun onMessage(webSocket: WebSocket, text: String) {
             val control = JSONObject(text)
+            if (control.optString("t") == "attach") attachments.put(control.getString("session"))
             if (control.optString("t") == "auth") {
                 authentications.put(webSocket to control)
                 message?.let { webSocket.send(it) }
             }
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            inputs.put(bytes)
         }
 
         fun authenticatedSocket(): WebSocket {
@@ -193,7 +384,7 @@ class SessionRefreshTest {
         }
     }
 
-    private fun MockWebServer.roster(message: String? = null) = RosterReply(message).also {
+    private fun MockWebServer.roster(message: String? = null, attachments: LinkedBlockingQueue<String> = LinkedBlockingQueue()) = RosterReply(message, attachments).also {
         enqueue(MockResponse().withWebSocketUpgrade(it))
     }
 
