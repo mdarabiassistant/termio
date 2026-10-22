@@ -128,6 +128,8 @@ pub struct CarriedSession {
     #[serde(default)]
     pub custom_name_revision: u64,
     #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
     pub workstream: Option<crate::protocol::WorkstreamSpec>,
     /// The PTY master, as a descriptor number in the process about to `execve`.
     ///
@@ -651,6 +653,7 @@ mod tests {
             title: None,
             custom_name: None,
             custom_name_revision: 0,
+            role: None,
             workstream: None,
             master_fd: -1,
             ring_len,

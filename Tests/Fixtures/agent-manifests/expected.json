@@ -120,7 +120,7 @@
         "directory": null,
         "events": [
           {
-            "matcher": "clear",
+            "matcher": "startup|resume|clear",
             "name": "SessionStart",
             "state": "idle"
           },

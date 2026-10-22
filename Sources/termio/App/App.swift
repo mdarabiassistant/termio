@@ -186,6 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         store.refreshKnownDeviceSessions()
         store.startLocalSessionDiscovery()
+        // After the roster requests above, so the one-at-a-time check has the
+        // other machines' answers on their way.
+        store.startChiefOfStaff()
         LaunchTrace.mark("store restored")
         // Task-completion notifications: the delegate must be installed before a
         // notification click can arrive, so wire it before any session runs.
@@ -474,9 +477,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 store.companionRenameSession(sessionID: sessionID, name: name, completion: completion)
+            },
+            sendToChief: { [weak store] sessionID, text in
+                guard let store else {
+                    return .error(message: "Termio is no longer running.", code: "not_live")
+                }
+                return await store.companionSendToChief(sessionID: sessionID, text: text)
+            },
+            latestChiefNotice: { [weak store] in
+                store?.chiefOfStaffWireNotice
             }
         )
         companionServer = companion
+        store.onCompanionNotice = { [weak companion] notice in
+            companion?.publishNotice(notice)
+        }
         // Serving and publishing are one decision, so they fail as one: a
         // second instance that loses the race for the port must not leave a
         // public URL pointing at it.
@@ -1653,6 +1668,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// View ▸ Command Palette… (⌘⇧P) — the *verbs* palette: run an app action
     /// (see `presentCommandPalette`).
+    /// View ▸ Chief of Staff (⌘⇧C): its pane, wherever you are. With it off,
+    /// Settings ▸ Agents, where it is turned on.
+    @objc func showChiefOfStaff(_ sender: Any?) {
+        if store.chiefOfStaffID != nil {
+            store.revealChiefOfStaff()
+        } else {
+            openSettings(initialTab: .agents)
+        }
+    }
+
     @objc func toggleCommandPalette(_ sender: Any?) {
         store.paletteMode = store.paletteMode == .commands ? nil : .commands
     }
@@ -3446,6 +3471,11 @@ private func buildMainMenu() -> NSMenu {
         withTitle: localized("Command Palette…"),
         action: #selector(AppDelegate.toggleCommandPalette(_:)),
         command: .commandPalette
+    )
+    viewMenu.addItem(
+        withTitle: localized("Chief of Staff"),
+        action: #selector(AppDelegate.showChiefOfStaff(_:)),
+        command: .chiefOfStaff
     )
     viewMenu.addItem(.separator())
     // iTerm2's split shortcuts: ⌘D right, ⌘⇧D down. The new pane opens a plain

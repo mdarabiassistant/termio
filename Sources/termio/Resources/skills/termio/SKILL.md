@@ -83,12 +83,13 @@ id-prefix works too).
 - `--wait [--timeout <ms>]` on `send`, `spawn`, or `run` — block until that turn
   settles and reply with the final `status`, the `transcript` path, and the
   `cursor`..`cursor_end` line range holding the response — one call instead
-  of send-then-poll. A sibling that stops to ask you something short-circuits
-  the wait: the reply is `status:"needs-you"` with the on-screen question in
-  `prompt` — answer it with another `send`. Exit codes: 0 settled, 1 error
+  of send-then-poll. A sibling that stops to ask you something — mid-turn, or
+  at startup before it takes its first prompt — short-circuits the wait: the
+  reply is `status:"needs-you"` with the on-screen question in `prompt` —
+  answer it with another `send`. Exit codes: 0 settled, 1 error
   (`prompt_stalled` = the input showed no effect within 5s; `session_closed`
-  / `agent_gone` = the target vanished mid-wait), 3 timed out (session still
-  running — re-arm or read its transcript).
+  / `agent_gone` = the target closed or its agent exited mid-wait), 3 timed
+  out (session still running — re-arm or read its transcript).
 - `termio sessions close <link> …` — close session tabs;
   `termio sessions focus <link>` — bring one to the front in the app
 

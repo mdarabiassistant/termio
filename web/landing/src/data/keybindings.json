@@ -38,6 +38,11 @@
           "id": "commandPalette",
           "title": "Command Palette…",
           "shortcut": "⇧⌘P"
+        },
+        {
+          "id": "chiefOfStaff",
+          "title": "Chief of Staff",
+          "shortcut": "⇧⌘C"
         }
       ]
     },

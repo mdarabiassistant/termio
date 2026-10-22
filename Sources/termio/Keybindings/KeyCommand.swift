@@ -12,6 +12,7 @@ enum KeyCommandID: String, CaseIterable, Identifiable {
     // Navigation
     case openQuickly = "nav.open-quickly"
     case commandPalette = "nav.command-palette"
+    case chiefOfStaff = "nav.chief-of-staff"
     // Session
     case nextSession = "session.next"
     case previousSession = "session.previous"
@@ -81,6 +82,10 @@ enum KeyCommandCatalog {
               defaultShortcut: .init(modifiers: [.command, .shift], key: .char("o"))),
         .init(id: .commandPalette, category: localized("Navigation"), title: localized("Command Palette…"),
               defaultShortcut: .init(modifiers: [.command, .shift], key: .char("p"))),
+        // ⌘⇧C for Chief of Staff: free in the catalog and in ghostty's defaults,
+        // and it joins the other two ⌘⇧ navigation keys.
+        .init(id: .chiefOfStaff, category: localized("Navigation"), title: localized("Chief of Staff"),
+              defaultShortcut: .init(modifiers: [.command, .shift], key: .char("c"))),
         // Session — cycling follows the sidebar's visual order (see
         // `selectAdjacentSession`). ⌘⇧]/⌘⇧[ is the iTerm2/Chrome tab-cycling
         // convention; ghostty's own next/previous_tab on the same keys are

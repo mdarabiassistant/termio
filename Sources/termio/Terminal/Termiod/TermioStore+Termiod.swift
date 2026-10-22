@@ -3,6 +3,153 @@ import Foundation
 import GhosttyTerminal
 import TermioShared
 
+/// One status subscription per machine, including sessions with no terminal
+/// attachment. The roster repairs gaps; changes received during that request
+/// outrank its answer. Neither subscribing nor applying a status creates a PTY.
+@MainActor
+final class DeviceStatusWatch {
+    let device: KnownDevice
+    var watch: Termiod.ResourceWatch?
+    var revision: UInt64 = 0
+    var snapshotGeneration: UInt64?
+    var latest: [String: (revision: UInt64, change: Termiod.StatusChangedPayload)] = [:]
+    var delivered: [String: UInt64] = [:]
+    var attachmentRevisions: [String: UInt64] = [:]
+
+    init(device: KnownDevice) { self.device = device }
+
+    func requireSnapshot() {
+        revision += 1
+        snapshotGeneration = revision
+    }
+}
+
+extension TermioStore {
+    func deviceStatusKey(for device: KnownDevice) -> String {
+        if let id = device.deviceID ?? TermiodDeviceRegistry.shared.deviceID(for: device.route) {
+            return "device:" + id
+        }
+        return "route:" + device.route.description
+    }
+
+    func hasDeviceStatusWatch(for session: Session) -> Bool {
+        let device = KnownDevice(alias: session.termiodRemoteHost, deviceID: session.deviceID)
+        return deviceStatusWatches[deviceStatusKey(for: device)]?.watch?.isSubscribed == true
+    }
+
+    func attachedStatusShouldApply(for session: Session) -> Bool {
+        let row = self.session(session.id) ?? session
+        let device = KnownDevice(alias: row.termiodRemoteHost, deviceID: row.deviceID)
+        guard let watch = deviceStatusWatches[deviceStatusKey(for: device)] else { return true }
+        guard watch.watch?.isSubscribed != true else { return false }
+        if let daemonID = row.termiodDaemonID {
+            watch.revision += 1
+            watch.attachmentRevisions[daemonID] = watch.revision
+        }
+        return true
+    }
+
+    func ensureDeviceStatusWatch(for device: KnownDevice) {
+        let key = deviceStatusKey(for: device)
+        if let existing = deviceStatusWatches[key] {
+            // A successful roster through another alias repairs a dead route.
+            guard existing.device.route != device.route,
+                  existing.watch?.isSubscribed != true else { return }
+        }
+        let state = DeviceStatusWatch(device: device)
+        deviceStatusWatches[key] = state
+        state.watch = Termiod.ResourceWatch(
+            route: device.route, caps: [Termiod.ResourceWatch.capability],
+            resource: Termiod.statusResource,
+            onStatus: { [weak self, weak state] change in
+                DispatchQueue.main.async {
+                    guard let self, let state, self.deviceStatusWatches[key] === state else { return }
+                    self.receiveDeviceStatus(change, from: device, watch: state)
+                }
+            }, onUpdate: { [weak self, weak state] update in
+                DispatchQueue.main.async {
+                    guard let self, let state, self.deviceStatusWatches[key] === state else { return }
+                    switch update {
+                    case .established(let cursor):
+                        // A new daemon's replay ring begins at zero again.
+                        if state.latest.values.contains(where: { $0.change.seq > cursor }) {
+                            state.latest.removeAll()
+                            state.delivered.removeAll()
+                            state.attachmentRevisions.removeAll()
+                        }
+                    case .reset: break
+                    case .batch: return
+                    }
+                    state.requireSnapshot()
+                    self.refreshDeviceSessions(on: device, force: true)
+                }
+            })
+    }
+
+    func receiveDeviceStatus(_ change: Termiod.StatusChangedPayload,
+                             from device: KnownDevice, watch: DeviceStatusWatch) {
+        guard watch.latest[change.session].map({ change.seq > $0.change.seq }) ?? true else { return }
+        watch.revision += 1
+        watch.latest[change.session] = (watch.revision, change)
+        if !deliverDeviceStatus(change, from: device, watch: watch) {
+            // The event can beat the roster that adopts a newly created row.
+            if watch.snapshotGeneration == nil { watch.requireSnapshot() }
+            refreshDeviceSessions(on: device, force: true)
+        }
+    }
+
+    @discardableResult
+    func deliverDeviceStatus(_ change: Termiod.StatusChangedPayload,
+                             from device: KnownDevice, watch: DeviceStatusWatch) -> Bool {
+        guard let row = sessions(authoredFor: device).first(where: {
+            $0.termiodDaemonID == change.session
+        }) else { return false }
+        guard watch.delivered[change.session] != change.seq else { return true }
+        watch.delivered[change.session] = change.seq
+        if let seconds = change.stalledWorkingSeconds {
+            applyTermiodStalled(.init(session: change.session, workingSeconds: seconds,
+                transcriptLinesGrown: change.stalledTranscriptLinesGrown ?? 0), for: row.id)
+        } else {
+            // Replayed hooks describe status, not the current agent's readiness.
+            applyTermiodStatus(change.report, for: row.id, provesReadiness: false, preserveTool: true)
+        }
+        return true
+    }
+
+    func applyDeviceStatusSnapshot(_ live: [Termiod.SessionInformation], from device: KnownDevice,
+                                   watch: DeviceStatusWatch, generation: UInt64, revision: UInt64) {
+        guard watch.snapshotGeneration == generation else { return }
+        watch.snapshotGeneration = nil
+        let rows = sessions(authoredFor: device)
+        for info in live where info.alive {
+            guard let row = rows.first(where: { $0.termiodDaemonID == info.id }),
+                  (watch.latest[info.id]?.revision ?? 0) <= revision,
+                  (watch.attachmentRevisions[info.id] ?? 0) <= revision else { continue }
+            // A roster repairs attached rows too: while the subscription was
+            // active, their other channel deliberately withheld status changes.
+            // A snapshot has no hook provenance and cannot answer a startup gate.
+            applyTermiodStatus(.init(session: info.id, status: info.status, title: info.title,
+                source: "snapshot", blocking: info.statusBlocking ?? false), for: row.id, provesReadiness: false)
+        }
+        for pending in watch.latest.values where pending.revision > revision {
+            deliverDeviceStatus(pending.change, from: device, watch: watch)
+        }
+        // A stalled event can arrive before the roster adopts its row. Unlike
+        // status, that signal has no snapshot field; retain it while the roster
+        // still says the session is working.
+        for pending in watch.latest.values where pending.revision <= revision
+            && pending.change.stalledWorkingSeconds != nil {
+            if live.contains(where: { $0.id == pending.change.session && $0.alive && $0.status == "working" }) {
+                deliverDeviceStatus(pending.change, from: device, watch: watch)
+            }
+        }
+        let ids = Set(live.filter(\.alive).map(\.id))
+        watch.latest = watch.latest.filter { ids.contains($0.key) || $0.value.revision > revision }
+        watch.delivered = watch.delivered.filter { watch.latest[$0.key] != nil }
+        watch.attachmentRevisions = watch.attachmentRevisions.filter { ids.contains($0.key) || $0.value > revision }
+    }
+}
+
 /// Session plumbing: sessions run inside a termiod daemon — the local one, or
 /// one reached over SSH — and this app is an attach client. Kept beside the
 /// protocol client so the whole backend lives in one folder.
@@ -53,14 +200,16 @@ extension TermioStore {
                 env: env.map { [$0.key, $0.value] },
                 rows: UInt16(clamping: lastHostGridRows),
                 cols: UInt16(clamping: lastHostGridColumns),
-                customName: session.givenTitle)
+                customName: session.givenTitle,
+                role: session.role?.rawValue)
             : Termiod.CreateSpecification(
                 cwd: session.termiodRemoteCwd ?? "",
                 argv: [],
                 env: Self.presentationEnvironment(from: env),
                 rows: UInt16(clamping: lastHostGridRows),
                 cols: UInt16(clamping: lastHostGridColumns),
-                command: command, customName: session.givenTitle)
+                command: command, customName: session.givenTitle,
+                role: session.role?.rawValue)
         let opening = viewport ?? TerminalGrid(
             rows: UInt16(clamping: lastHostGridRows), cols: UInt16(clamping: lastHostGridColumns))
         return TermiodSessionLink(
@@ -105,6 +254,7 @@ extension TermioStore {
                            to inMemory: InMemoryTerminalSession,
                            for session: Session) {
         let isAgentSession = session.agent != .terminal && !session.isSSH
+        if session.role == .chief { noteChiefOfStaffAgentRestarted() }
         link.onOutput = { [weak inMemory] data in
             inMemory?.receive(data)
         }
@@ -138,10 +288,13 @@ extension TermioStore {
         // — the hook socket is on the wrong machine, which is exactly why
         // `presentationEnvironment` withholds `TERMIO_SESSION` from a remote.
         link.onStatus = { [weak self] status in
-            self?.applyTermiodStatus(status, for: session.id)
+            guard let self else { return }
+            self.applyTermiodStatus(status, for: session.id,
+                                    applyState: self.attachedStatusShouldApply(for: session))
         }
         link.onStalled = { [weak self] stall in
-            self?.applyTermiodStalled(stall, for: session.id)
+            guard let self, !self.hasDeviceStatusWatch(for: session) else { return }
+            self.applyTermiodStalled(stall, for: session.id)
         }
         // Input only: the link gates its `D` frames on this. Nothing about the
         // *size* rides it any more — a pane is letterboxed at the session's grid
@@ -191,6 +344,7 @@ extension TermioStore {
                 isPlainTerminal: isPlainTerminal, surface: inMemory)
         }
         termiodLinks[session.id] = link
+        parkedExits[session.id] = nil
         link.start()
     }
 
@@ -236,25 +390,31 @@ extension TermioStore {
     /// stays opt-in behind `--state stalled`. The evidence sentence is worded
     /// here rather than on the device, because it is prose a person reads.
     func applyTermiodStalled(_ stall: Termiod.StalledPayload, for id: Session.ID) {
-        guard let session = session(id), let project = project(for: id) else { return }
+        // Keyed like `setStatus`'s events: a project, or a loose session's workspace.
+        guard let session = session(id), session.role != .chief,
+              let scopeID = project(for: id)?.id ?? workspace(for: id)?.id else { return }
         let minutes = max(1, Int(stall.workingSeconds / 60))
         let grown = Int(stall.transcriptLinesGrown)
         let growth = "transcript +\(grown) line" + (grown == 1 ? "" : "s")
         var event = SessionWatchEvent(
-            projectID: project.id,
+            projectID: scopeID,
             link: sessionLink(for: session),
             status: "stalled",
             title: displayTitle(for: session),
             cwd: runtimes[id]?.workingDirectory ?? "")
-        event.evidence = "working \(minutes)m, no repo change, \(growth)"
+        let evidence = "working \(minutes)m, no repo change, \(growth)"
+        event.evidence = evidence
         SessionWatchHub.shared.broadcast(event)
+        noteForChiefOfStaff(status: "stalled", evidence: evidence, for: id)
     }
 
     /// Lands an `E status` event on the session's row. The vocabulary is the
     /// protocol's; the mapping to a dot, a spinner, or a notification mirrors
     /// `applyStatusReport` arm for arm, so a session behaves the same whether
     /// its status came from a local hook or from the daemon.
-    func applyTermiodStatus(_ report: Termiod.StatusPayload, for id: Session.ID) {
+    func applyTermiodStatus(_ report: Termiod.StatusPayload, for id: Session.ID,
+                           applyState: Bool = true, provesReadiness: Bool = true,
+                           preserveTool: Bool = false) {
         guard session(id) != nil else { return }
 
         // Everything from here to the state switch used to sit behind the app's
@@ -321,7 +481,36 @@ extension TermioStore {
             // concluded about its exit (§D2).
             agentExitStreaks[id] = nil
             if runtimes[id]?.agentExitNotice != nil { runtimes[id]?.agentExitNotice = nil }
+            // Only a hook proves the agent is past its startup gates: a title or
+            // a screen streak can move while a prompt still waits on a key. A
+            // daemon that names no source predates every other channel.
+            let fromHook = report.source == nil || report.source == "hook"
+            if fromHook, provesReadiness, isChiefOfStaff(id) {
+                noteChiefOfStaffAgentReported()
+            }
+            // An agent launched with its prompt has started on it once a hook
+            // speaks, or once its own title or progress marker says it is working
+            // — those two never spin for a startup question. A screen streak can:
+            // a boot animation repaints like a turn.
+            let workingByItsOwnWord = report.status == "working"
+                && (report.source == "title" || report.source == "progress")
+            if provesReadiness && (fromHook || workingByItsOwnWord) {
+                launchesAwaitingStart.removeValue(forKey: id)
+                heldAtStartup.remove(id)
+            }
         }
+        if !applyState {
+            if report.status == "working" { setCurrentTool(report.tool, for: id) }
+            return
+        }
+        // Until then the agent is starting, whatever the screen suggests. Its
+        // startup question repainting — a window resize is enough — reads to the
+        // device as a turn, and the sweep that ends the guess twelve seconds later
+        // would put the row back to idle over the needs-you `watchLaunchedPrompt`
+        // raised, so the question would stop reaching you. A needs-you passes:
+        // that one is never a guess about activity.
+        let guessedFromScreen = report.source == "screen" || report.source == "streak"
+        if isStartingUp(id), guessedFromScreen, report.status != "needs_you" { return }
         // `done` and `idle` are the same fact seen from two sides, and which one
         // a row shows depends on whether *this* window is looking at it — the
         // one piece of status arbitration that stays with the viewer (device
@@ -343,7 +532,7 @@ extension TermioStore {
             // machine — and would drop a local one whenever the foreground poll
             // had not caught up yet.
             setStatus(.working, for: id)
-            setCurrentTool(report.tool, for: id)
+            if !preserveTool { setCurrentTool(report.tool, for: id) }
             // Remember when work was last seen, so a turn that ends abnormally
             // (the agent crashed and never sent `done`) can be swept back to calm
             // instead of spinning forever.
@@ -409,6 +598,7 @@ extension TermioStore {
         // later close can journal it — the identity the roster sweep matches a
         // pending kill by (`journalClaims`).
         recordDaemonSessionID(information.id, for: id)
+        applyChiefOfStaffReadiness(information, for: id)
         // `nil` argv is *unanswered*, so it never reaches `noteForegroundAgent` —
         // which reads its own `nil` as "a shell is in front now" and demotes.
         // An answered argv that matches nothing is that demotion, correctly.
@@ -451,9 +641,13 @@ extension TermioStore {
             runtime(for: id).agentExitNotice = nil
         case .demote:
             clearWorking(id)
+            // The agent is gone, and with it whatever it was asking at startup.
+            launchesAwaitingStart.removeValue(forKey: id)
+            heldAtStartup.remove(id)
             setStatus(.idle, for: id)
             runtime(for: id).agentExitNotice =
                 localized("\(session.agent.displayName) exited — shell")
+            if session.role == .chief { noteChiefOfStaffAgentRestarted() }
         }
     }
 
@@ -567,6 +761,10 @@ extension TermioStore {
         // the session it named has ended — the row must not keep offering to
         // reconnect to it.
         runtimes[id]?.connectionNotice = nil
+        // Nor ask what its agent was asking at startup: the process took the
+        // question with it.
+        launchesAwaitingStart.removeValue(forKey: id)
+        if heldAtStartup.remove(id) != nil { setStatus(.idle, for: id) }
         // The same policy the in-process PTY runs, on the same three inputs. The
         // self-update check is no longer missing here: the app cannot pin a
         // process it does not own, but the daemon that owns it can, and the exit
@@ -590,6 +788,8 @@ extension TermioStore {
                         runtimeMilliseconds: runtimeMilliseconds)
         if outcome == .close {
             closeSession(id)
+        } else {
+            parkedExits[id] = code
         }
     }
 
@@ -709,6 +909,7 @@ extension TermioStore {
     func stopLocalSessionDiscovery() {
         localSessionDiscoveryTimer?.invalidate()
         localSessionDiscoveryTimer = nil
+        deviceStatusWatches.removeAll()
     }
 
     func refreshKnownDeviceSessions(
@@ -725,6 +926,7 @@ extension TermioStore {
 
     func refreshDeviceSessions(
         on device: KnownDevice? = nil,
+        force: Bool = false,
         fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
             try Termiod.roster(route: $0)
         }
@@ -749,13 +951,19 @@ extension TermioStore {
         let settledRecently = fetch.settledAt.map {
             $0.duration(to: .now) < Self.rosterCoalescingWindow
         } ?? false
-        if fetch.inFlight
-            || (settledRecently && deviceSessionsRoute == key && deviceSessions.sessions != nil) {
+        if fetch.inFlight {
+            if force { rosterFetches[key]?.refreshAfterReply = true }
+            return
+        }
+        if !force && settledRecently && deviceSessionsRoute == key && deviceSessions.sessions != nil {
             Trace.device.report("roster coalesced", "route=\(key)", since: span.started)
             return
         }
 
         let persistedNames = Set(sessions(authoredFor: device).map(daemonSessionName(for:)))
+        let statusWatch = deviceStatusWatches[deviceStatusKey(for: device)]
+        let statusBaseline = statusWatch?.snapshotGeneration
+        let statusRevision = statusWatch?.revision ?? 0
         rosterFetches[key, default: RosterFetch()].inFlight = true
         // Only when there is nothing of this machine's to show. A switch back to
         // a device whose roster is already on screen keeps it there for the
@@ -786,6 +994,16 @@ extension TermioStore {
                     Trace.device.report("roster round trip", "route=\(key)", since: requested)
                     self.applyRoster(outcome, from: device, route: route,
                                      persisted: persistedNames)
+                    if case .success(let payload) = outcome,
+                       let statusWatch, let statusBaseline,
+                       self.deviceStatusWatches[self.deviceStatusKey(for: device)] === statusWatch {
+                        self.applyDeviceStatusSnapshot(payload.sessions, from: device,
+                            watch: statusWatch, generation: statusBaseline, revision: statusRevision)
+                    }
+                    if self.rosterFetches[key]?.refreshAfterReply == true {
+                        self.rosterFetches[key]?.refreshAfterReply = false
+                        self.refreshDeviceSessions(on: device, force: true, fetchingRoster: fetchingRoster)
+                    }
                 }
             }
         }
@@ -847,6 +1065,7 @@ extension TermioStore {
             // pending kill whose first attempt failed leaves the roster looking
             // exactly as it did, and that is precisely when it must be retried.
             reconcileExternalSessions(live, from: device, route: route)
+            if !AppChannel.isRunningTests { ensureDeviceStatusWatch(for: device) }
             // Published only when it would say something different. The sidebar
             // rebuilds on every publish, and a device that answers what it
             // answered last time — a switch back into a machine nothing has
@@ -1234,6 +1453,7 @@ extension TermioStore {
         for session in mine {
             guard let information = idsByName[daemonSessionName(for: session)] else { continue }
             recordDaemonSessionID(information.id, for: session.id)
+            applyChiefOfStaffReadiness(information, for: session.id)
             updateSession(session.id) {
                 $0.prepareNameBackfill()
                 $0.acceptDaemonName(information)
@@ -1338,15 +1558,26 @@ extension TermioStore {
     /// name for a clone) for a session that lands in a machine's own workspace. A
     /// session that lands under a project takes that project's own naming instead —
     /// see `createRemoteTerminalSession`.
+    ///
+    /// `inBackground` is for a caller nobody is watching — the Chief of Staff
+    /// starting work while you are on your phone: the session doesn't take the
+    /// selection, a failure is logged rather than put up as a modal, and
+    /// `created` hands back the new session's id (`nil` on failure) so the
+    /// caller can report it.
     func addRemoteTerminal(
         host: String,
         agent: AgentPreset = .terminal,
         cwd: String? = nil,
         title: String? = nil,
-        project projectID: UUID? = nil
+        project projectID: UUID? = nil,
+        inBackground: Bool = false,
+        created: ((Session.ID?) -> Void)? = nil
     ) {
         let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else { return }
+        guard !host.isEmpty else {
+            created?(nil)
+            return
+        }
 
         // The checkout is resolved *after* readiness, not before, because it is
         // keyed by device and only the handshake knows which device this alias
@@ -1354,10 +1585,21 @@ extension TermioStore {
         // remove: the same clone, reached over `vps-wan` instead of `vps-lan`,
         // would read as "not cloned yet".
         ensureRemoteReady(host: host) { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                created?(nil)
+                return
+            }
             switch result {
             case .failure(let error):
-                self.presentRemoteSetupFailure(host: host, message: error.message)
+                if inBackground {
+                    Log.termiod.error("""
+                    starting a session on \(host, privacy: .public) failed: \
+                    \(error.message, privacy: .public)
+                    """)
+                } else {
+                    self.presentRemoteSetupFailure(host: host, message: error.message)
+                }
+                created?(nil)
             case .success(let device):
                 var cwd = cwd
                 // Opened from a project row: the user means "this repo, on that
@@ -1370,7 +1612,10 @@ extension TermioStore {
                 if let projectID, let project = self.projects.first(where: { $0.id == projectID }) {
                     let target = KnownDevice(alias: host, deviceID: device.id)
                     guard let checkout = self.remoteCheckoutReading(for: project, on: target) else {
-                        self.presentRemoteCheckoutMissing(host: host, project: project.name)
+                        if !inBackground {
+                            self.presentRemoteCheckoutMissing(host: host, project: project.name)
+                        }
+                        created?(nil)
                         return
                     }
                     if case .recorded(let path) = checkout,
@@ -1380,10 +1625,11 @@ extension TermioStore {
                     }
                     cwd = checkout.path
                 }
-                self.createRemoteTerminalSession(
+                let id = self.createRemoteTerminalSession(
                     host: host, agent: agent, device: device.id, cwd: cwd, title: title,
-                    project: projectID
+                    project: projectID, select: !inBackground
                 )
+                created?(id)
             }
         }
     }
@@ -1408,14 +1654,16 @@ extension TermioStore {
     /// Filed by machine, unlike the plain `ssh` shell `addSSHSession` opens: this
     /// process really does live on the box and outlive the connection to it, so the
     /// workspace holding it is telling the truth about where its work is.
+    @discardableResult
     private func createRemoteTerminalSession(
         host: String,
         agent: AgentPreset = .terminal,
         device deviceID: String,
         cwd: String?,
         title: String?,
-        project projectID: UUID? = nil
-    ) {
+        project projectID: UUID? = nil,
+        select: Bool = true
+    ) -> Session.ID? {
         var session = Session(title: title ?? host, agent: agent)
         session.termiodRemoteHost = host
         // Known up front here, unusually: the session is only created once
@@ -1443,12 +1691,12 @@ extension TermioStore {
             let count = projects[index].sessions.filter { $0.agent == .terminal }.count
             session.title = agent == .terminal ? "Terminal \(count + 1)" : agent.displayName
             projects[index].sessions.append(session)
-            selectedSessionID = session.id
-            return
+            if select { selectedSessionID = session.id }
+            return session.id
         }
 
         let workspaceID = deviceWorkspace(for: host, deviceID: deviceID)
-        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
+        guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return nil }
         // The workspace is already named for the machine, so an unnamed session
         // numbers itself like any other terminal instead of repeating the machine
         // name down the column (`ukvps ▸ ukvps`).
@@ -1457,7 +1705,8 @@ extension TermioStore {
             session.title = agent == .terminal ? "Terminal \(count + 1)" : agent.displayName
         }
         workspaces[index].terminals.append(session)
-        selectedSessionID = session.id
+        if select { selectedSessionID = session.id }
+        return session.id
     }
 
     /// A remote-setup outcome carrying a human message on failure (host

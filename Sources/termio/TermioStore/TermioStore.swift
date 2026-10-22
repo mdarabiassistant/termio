@@ -80,18 +80,21 @@ final class TermioStore: ObservableObject {
                 applyInspectorState(selectedSessionID.flatMap { inspectorStates[$0] } ?? InspectorState())
             }
             if let id = selectedSessionID {
+                // The Chief of Staff spans every scope, so looking at it moves you
+                // out of none and becomes no scope's "where was I".
+                let spansScopes = isChiefOfStaff(id)
                 // Looking at a session is being in its workspace. A global verb —
                 // a deep link, the palette, a notification, an SSH shell filed
                 // under a machine's fallback — can put the selection anywhere, and
                 // a window showing one scope while the terminal belongs to another
                 // is the same confusion the device context exists to prevent.
-                enterWorkspace(of: id)
+                if !spansScopes { enterWorkspace(of: id) }
                 // Every selection is also the answer to "where was I in this
                 // scope", so the workspace it belongs to remembers it (see
                 // `workspaceSelections`). Filed under the session's *own*
                 // workspace rather than the current one, so a deep link that
                 // jumps scopes records the arrival where it landed.
-                if let owner = workspace(for: id)?.id { workspaceSelections[owner] = id }
+                if !spansScopes, let owner = workspace(for: id)?.id { workspaceSelections[owner] = id }
                 // Looking at a session is being on its machine. Every path that
                 // moves the selection — a deep link, the palette, a notification,
                 // a split, a freshly opened remote terminal — lands here, so this
@@ -867,6 +870,14 @@ final class TermioStore: ObservableObject {
     func setStatus(_ status: SessionStatus, for id: Session.ID) -> Bool {
         let runtime = runtime(for: id)
         guard runtime.status != status else { return false }
+        // A launch held at its startup question stays waiting on you until the
+        // question is answered, the agent starts, or its process ends. Each of
+        // those drops `heldAtStartup` before writing, so anything else reaching
+        // here would hide a question nobody answered.
+        if heldAtStartup.contains(id), runtime.status == .needsAttention {
+            refuseStatusOverHeldLaunch(status, for: id)
+            return false
+        }
         runtime.status = status
         // A blocked session's dot survives a click (see `markSeen`); any genuine
         // transition off `.needsAttention` — the agent proceeded, or the condition
@@ -877,9 +888,14 @@ final class TermioStore: ObservableObject {
         // Push the genuine transition to any `termio sessions watch` clients scoped
         // to this session's project. The hub does the socket writes off the main
         // thread, so a watcher never slows the agent tick that produced the event.
-        if let session = session(id), let project = project(for: id) {
+        runtime.statusSince = Date()
+        // A loose session's watchers are keyed by its workspace, the same id its
+        // `ControlScope` carries; the Chief of Staff's own transitions are no
+        // one's business but yours, so they are not broadcast at all.
+        if let session = session(id), session.role != .chief,
+           let scopeID = project(for: id)?.id ?? workspace(for: id)?.id {
             var event = SessionWatchEvent(
-                projectID: project.id,
+                projectID: scopeID,
                 link: sessionLink(for: session),
                 status: Self.statusToken(status),
                 title: displayTitle(for: session),
@@ -889,7 +905,9 @@ final class TermioStore: ObservableObject {
             // without a second round-trip (design doc §4.3).
             attachActionablePayload(to: &event, for: id)
             SessionWatchHub.shared.broadcast(event)
+            noteForChiefOfStaff(status: event.status, for: id)
         }
+        if isChiefOfStaff(id) { noteChiefOfStaffStatus(status) }
         // A session *entering* `.working` is the "this project is active" signal that
         // floats its project up the Recent-Activity sort. Bumping here, on the genuine
         // transition, means one write per turn instead of one per hook/screen tick — the
@@ -995,6 +1013,43 @@ final class TermioStore: ObservableObject {
     /// as an answer to its own question. Reported by `sessions list` because the
     /// caller already has its reply by the time this is known.
     var undeliveredPrompts: Set<Session.ID> = []
+    /// A spawn's prompt waiting for its session's first launch, which puts it on
+    /// the agent's command line (`AgentDefinition.promptArgument`). That launch
+    /// takes it, so a later one resumes the conversation instead of replaying the
+    /// prompt. Not `@Published`: the launch happens inside a pane's render.
+    var launchPrompts: [Session.ID: String] = [:]
+    /// Sessions launched with their prompt whose agent hasn't yet shown it
+    /// started, each with the moment `watchLaunchedPrompt` decides it is waiting
+    /// on you.
+    var launchesAwaitingStart: [Session.ID: Date] = [:]
+    /// Sessions `watchLaunchedPrompt` marked as waiting on you. The mark is this
+    /// app's alone, so it is also this app that clears it, and only for three
+    /// reasons: the question was answered (`noteInputBeforeStart`), the agent
+    /// started, or its process ended. `setStatus` refuses everything else.
+    var heldAtStartup: Set<Session.ID> = []
+    /// Sessions whose process ended while attached and was left on screen
+    /// ("Process exited"), with its exit code: the news a tombstone brings on the
+    /// next roster sweep, at the moment it happens. Cleared when the session is
+    /// attached to a process again.
+    var parkedExits: [Session.ID: Int32] = [:]
+    /// When someone last typed into each session — real key-downs only, so
+    /// Termio's own sends never count. Read by the Chief of Staff's
+    /// `user_typing` refusal and its event feed's hold.
+    var lastUserInputAt: [Session.ID: Date] = [:]
+    /// The key-down monitor feeding `lastUserInputAt`, held for the app's lifetime.
+    var keyboardInputMonitor: Any?
+    /// The Chief of Staff's unpersisted state: where its latest input came from,
+    /// its pending event feed, and whether a turn you started owes you a notice
+    /// (`TermioStore+ChiefOfStaff.swift`).
+    var chiefOfStaff = ChiefOfStaffState()
+    /// What the Chief of Staff last told you, for its sidebar row and the phone.
+    @Published var chiefOfStaffNotice: ChiefOfStaffNotice?
+    var chiefOfStaffWireNotice: WireNotice?
+    var onCompanionNotice: ((WireNotice) -> Void)?
+    /// Another machine holds the Chief of Staff claim, shown in Settings with a
+    /// way to take it over.
+    @Published var chiefOfStaffConflict: ChiefOfStaffConflict?
+    @Published var chiefOfStaffSetupError: String?
     /// The daemon attachment behind each session: each
     /// session's attach channel into the local termiod daemon, which owns the
     /// PTY so the session outlives this app instance.
@@ -1050,6 +1105,7 @@ final class TermioStore: ObservableObject {
     struct RosterFetch {
         /// A request is out and its reply is still coming.
         var inFlight = false
+        var refreshAfterReply = false
         /// When the last reply landed, so a repeat ask inside the coalescing
         /// window can be answered with what is already on screen.
         var settledAt: ContinuousClock.Instant?
@@ -1063,6 +1119,7 @@ final class TermioStore: ObservableObject {
 
     var rosterFetches: [String: RosterFetch] = [:]
     var localSessionDiscoveryTimer: Timer?
+    var deviceStatusWatches: [String: DeviceStatusWatch] = [:]
     var sessionNameUploads: Set<Session.ID> = []
     var sessionNameCompletions: [Session.ID: (token: UUID, complete: (Result<Void, Error>) -> Void)] = [:]
 
@@ -1230,6 +1287,7 @@ final class TermioStore: ObservableObject {
                 self?.applyAppearanceToOpenSurfaces()
                 self?.syncHooksInstallationIfNeeded()
                 self?.syncSessionControlInstallationIfNeeded()
+                self?.syncChiefOfStaffIfNeeded()
             }
 
         // A branch label changing is not a change to the persisted tree, so the

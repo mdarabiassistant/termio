@@ -49,6 +49,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "viewport",
     "spawn_command",
     "session_names",
+    "chief_of_staff",
 ];
 /// Snapshot payload carrying packed cells.
 ///
@@ -491,6 +492,21 @@ pub struct WorkstreamSpec {
     pub worktree: Option<String>,
 }
 
+/// Which machine has the Chief of Staff on, as one device records it
+/// (docs/design/20261019-chief-of-staff.md §7.3). Advisory: the app that turns
+/// it on writes this to every device it reaches, because a device is the one
+/// place two apps connecting from opposite sides can both read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChiefClaim {
+    /// The claiming machine's own `host_id`, which survives a rename.
+    pub machine: String,
+    /// What a refusal calls that machine.
+    pub machine_name: String,
+    /// The Chief of Staff session on that machine, as its app addresses it.
+    pub session: String,
+    pub since_unix: u64,
+}
+
 /// How to spawn a session's process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSpec {
@@ -498,6 +514,12 @@ pub struct CreateSpec {
     pub name: Option<String>,
     #[serde(default)]
     pub custom_name: Option<String>,
+    /// What the session is for, beyond being a terminal. `chief` marks the one
+    /// session a client made its Chief of Staff
+    /// (docs/design/20261019-chief-of-staff.md §7.3). Set at creation only, and
+    /// returned in every roster, so an app on another machine can see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     /// argv[0] is the program. Empty ⇒ the daemon picks the login shell.
@@ -541,6 +563,7 @@ impl Default for CreateSpec {
         CreateSpec {
             name: None,
             custom_name: None,
+            role: None,
             cwd: None,
             argv: Vec::new(),
             command: None,
@@ -573,6 +596,7 @@ pub fn normalize_status(status: &str) -> &str {
 /// is one edit rather than five.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusDetails {
+    pub agent_processes: Vec<crate::proc::AgentProcess>,
     pub transcript_path: Option<String>,
     pub conversation_id: Option<String>,
     pub tool: Option<String>,
@@ -588,6 +612,7 @@ impl StatusDetails {
             value.filter(|text| !text.is_empty())
         }
         StatusDetails {
+            agent_processes: self.agent_processes,
             transcript_path: some(self.transcript_path),
             conversation_id: some(self.conversation_id),
             tool: some(self.tool),
@@ -933,6 +958,32 @@ pub enum Control {
         session: SessionInfo,
         re: Option<u64>,
     },
+    /// Read this device's Chief of Staff claim (capability `chief_of_staff`).
+    GetChief {
+        #[serde(default)]
+        seq: Option<u64>,
+    },
+    /// Write, take over, or release the claim. `holder` is the requesting
+    /// machine's own host id; `claim: None` releases. The rule is
+    /// `chief::decide`.
+    SetChief {
+        #[serde(default)]
+        claim: Option<ChiefClaim>,
+        holder: String,
+        #[serde(default)]
+        takeover: bool,
+        #[serde(default)]
+        seq: Option<u64>,
+    },
+    /// The claim as it stands after either request. `refused` means a
+    /// `set_chief` changed nothing because another machine holds the claim.
+    Chief {
+        #[serde(default)]
+        claim: Option<ChiefClaim>,
+        #[serde(default)]
+        refused: bool,
+        re: Option<u64>,
+    },
     /// Report a session's agent status.
     ///
     /// Everything past `title` used to reach only the Mac app's own socket: the
@@ -944,6 +995,8 @@ pub enum Control {
     SetStatus {
         id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agent_processes: Vec<crate::proc::AgentProcess>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         /// The agent's own conversation log for this session (Claude Code's
@@ -1309,6 +1362,8 @@ impl Control {
             | Control::UploadAbort { seq, .. }
             | Control::Wait { seq, .. }
             | Control::SetName { seq, .. }
+            | Control::GetChief { seq }
+            | Control::SetChief { seq, .. }
             | Control::SetStatus { seq, .. }
             | Control::InstallAgents { seq, .. }
             | Control::ProbeAgents { seq, .. } => *seq,
@@ -1547,6 +1602,11 @@ pub struct SessionInfo {
     pub alive: bool,
     #[serde(default = "default_status")]
     pub status: String,
+    /// Explicit false from a capable daemon; absent on older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_blocking: Option<bool>,
     #[serde(default)]
     pub agent_id: Option<String>,
     /// The workstream's project root, or — for a session started without one —
@@ -1561,6 +1621,9 @@ pub struct SessionInfo {
     pub custom_name: Option<String>,
     #[serde(default)]
     pub custom_name_revision: u64,
+    /// See `CreateSpec::role`. Absent for an ordinary session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(default)]
     pub attached_clients: usize,
     #[serde(default)]
@@ -2468,11 +2531,14 @@ mod tests {
             created_unix: 1_700_000_000,
             alive: false,
             status: "done".to_string(),
+            agent_ready: Some(false),
+            status_blocking: Some(false),
             agent_id: Some("claude".to_string()),
             project: Some("/work".to_string()),
             title: None,
             custom_name: None,
             custom_name_revision: 0,
+            role: None,
             attached_clients: 0,
             writer_client_id: None,
             foreground_pid: None,

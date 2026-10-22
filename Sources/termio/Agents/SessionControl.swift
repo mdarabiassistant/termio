@@ -167,13 +167,23 @@ struct ControlRequest: Decodable {
     /// `spawn`/`run` placement: the new pane's fraction of the split. Stating
     /// one pins the divider so later spawns don't redistribute it away.
     let ratio: Double?
+    /// `spawn`/`run --cwd [machine:]path` and `--project <name|path>`: where a
+    /// session starts when it is not beside the caller. Only the Chief of
+    /// Staff may name one (docs/design/20261019-chief-of-staff.md §7.4).
+    let placeCwd: String?
+    let placeProject: String?
+    /// `notify --session <link>`: the session the notice is about, which a
+    /// click on the banner opens.
+    let about: String?
 
     private enum CodingKeys: String, CodingKey {
         case op, format, target, text, lines, agent, snapshot, wait, title, enter, keys
-        case direction, ratio
+        case direction, ratio, about
         case callerSession = "caller_session"
         case callerCwd = "caller_cwd"
         case timeoutMs = "timeout_ms"
+        case placeCwd = "place_cwd"
+        case placeProject = "place_project"
     }
 
     var wantsJSON: Bool { format == "json" }
@@ -613,8 +623,10 @@ final class SessionWatchHub: @unchecked Sendable {
             let line = event.wireLine
             let jsonLine = event.jsonLine
             for (fd, sub) in self.subscribers {
-                guard sub.projectID == event.projectID, sub.states.contains(event.status)
-                else { continue }
+                // A fleet subscriber — the Chief of Staff — hears every scope.
+                let inScope = sub.projectID == event.projectID
+                    || sub.projectID == TermioStore.fleetScopeID
+                guard inScope, sub.states.contains(event.status) else { continue }
                 if Self.write(fd, sub.wantsJSON ? jsonLine : line) {
                     self.subscribers[fd]?.lastWrite = Date()
                 } else {
@@ -718,7 +730,7 @@ private extension SessionWatchEvent {
 /// once took every hook that referenced its path down with it. The copy's path
 /// never changes; each launch refreshes its content from the running bundle.
 enum CommandLineTool {
-    /// The tool's name on PATH and inside the bundle: `termio` for a release build,
+    /// The tool's name on PATH: `termio` for a release build,
     /// `termio-dev` for the side-by-side dev channel, so the dev app links its own
     /// CLI instead of clobbering the release one.
     static var toolName: String { "termio" + AppChannel.suffix }
@@ -746,7 +758,15 @@ enum CommandLineTool {
     /// The bundled tool inside the running `.app`, or `nil` when running as a bare
     /// SwiftPM binary (`swift run`) where there is no Resources directory.
     static var bundledURL: URL? {
-        Bundle.main.url(forResource: toolName, withExtension: nil)
+        bundledURL(in: .main)
+    }
+
+    static func bundledURL(in bundle: Bundle) -> URL? {
+        // A private runtime channel changes the copy's name, not the resource
+        // shipped in the app. Looking up that private name leaves fresh profiles
+        // without a CLI and lets an agent fall back to another app's `termio`.
+        let name = bundle.bundleIdentifier == "sh.termio.app.dev" ? "termio-dev" : "termio"
+        return bundle.url(forResource: name, withExtension: nil)
     }
 
     /// The channel-stable copy of the tool (`…/Application Support/termio[-dev]/bin/`)
@@ -760,9 +780,13 @@ enum CommandLineTool {
     /// app build) is left serving. Returns whether a usable copy exists afterwards.
     @discardableResult
     static func refreshSupportCopy() -> Bool {
+        refreshSupportCopy(from: bundledURL, to: supportCopyURL)
+    }
+
+    @discardableResult
+    static func refreshSupportCopy(from bundled: URL?, to copy: URL) -> Bool {
         let fileManager = FileManager.default
-        let copy = supportCopyURL
-        guard let bundled = bundledURL, let content = try? Data(contentsOf: bundled) else {
+        guard let bundled, let content = try? Data(contentsOf: bundled) else {
             return fileManager.isExecutableFile(atPath: copy.path)
         }
         if (try? Data(contentsOf: copy)) != content {
@@ -778,8 +802,13 @@ enum CommandLineTool {
         }
         // An atomic write lands with default (non-executable) permissions, and hooks
         // exec the copy directly, so re-assert the mode even on the unchanged path.
-        try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copy.path)
-        return true
+        do {
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copy.path)
+        } catch {
+            FileHandle.standardError.write(
+                Data("termio: making the command-line tool executable failed: \(error)\n".utf8))
+        }
+        return fileManager.isExecutableFile(atPath: copy.path)
     }
 
     static func audit() -> Status {

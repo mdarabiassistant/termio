@@ -164,6 +164,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         workingItems.removeAll()
 
+        // The Chief of Staff leads, whatever its status: it is where you start,
+        // not one more row in the queue below.
+        if let chief = store.chiefOfStaffID.flatMap({ store.session($0) }) {
+            let item = NSMenuItem(
+                title: store.displayTitle(for: chief),
+                action: #selector(didPickSession(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = chief.id.uuidString
+            item.image = agentMenuImage(for: chief.agent)
+            if let notice = store.chiefOfStaffNotice?.body {
+                item.toolTip = notice
+            }
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
+        let rosterStart = menu.items.count
+
         // The roster is an "active + your turn" queue: working agents (shown with the
         // sidebar's orbiting-comet mark) plus the two resting states that want you —
         // done (green) or blocked on input (amber). Idle agents are getting on fine
@@ -172,7 +191,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // an agent waiting on the user must never be hidden behind a scope.
         for group in store.sidebarSessionGroups {
             let agentSessions = group.sessions
-                .filter { $0.agent != .terminal && shouldList(store.status(for: $0.id)) }
+                .filter {
+                    $0.agent != .terminal && $0.role != .chief
+                        && shouldList(store.status(for: $0.id))
+                }
                 // The states that want the user rise to the top of each project's
                 // rows — blocked first, then just-finished, then still working — so a
                 // glance lands on what's actionable before what's merely in progress.
@@ -210,7 +232,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
         }
 
-        if menu.items.isEmpty {
+        if menu.items.count == rosterStart {
             let empty = NSMenuItem(title: localized("All caught up"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)

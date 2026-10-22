@@ -1095,6 +1095,46 @@ extension Termiod {
         }
     }
 
+    /// The Chief of Staff claim a device holds, plus its own host id — the
+    /// identity a claim written from this machine is recorded under. `nil` for
+    /// a daemon too old to hold a claim, which the one-at-a-time check reads
+    /// as a device it cannot ask.
+    static func readChiefClaim(
+        route: TermiodRoute = .local
+    ) throws -> (claim: ChiefClaim?, hostID: String)? {
+        try withControlChannel(route: route, caps: ["chief_of_staff"]) { transport, handshake in
+            guard handshake.capabilities.contains("chief_of_staff") else { return nil }
+            try writeFrame(transport.writeDescriptor, kind: .control, payload: getChiefPayload())
+            return (try awaitChief(transport).claim, handshake.device.id)
+        }
+    }
+
+    /// Writes (or, with `claim == nil`, releases) the claim. `nil` for a daemon
+    /// too old to hold one; otherwise the claim as it now stands and whether the
+    /// write was refused because another machine holds it.
+    static func writeChiefClaim(
+        _ claim: ChiefClaim?, holder: String, takeover: Bool, route: TermiodRoute = .local
+    ) throws -> ChiefPayload? {
+        try withControlChannel(route: route, caps: ["chief_of_staff"]) { transport, handshake in
+            guard handshake.capabilities.contains("chief_of_staff") else { return nil }
+            try writeFrame(transport.writeDescriptor, kind: .control,
+                           payload: setChiefPayload(claim: claim, holder: holder, takeover: takeover))
+            return try awaitChief(transport)
+        }
+    }
+
+    private static func awaitChief(_ transport: Transport) throws -> ChiefPayload {
+        while true {
+            let frame = try readFrame(transport.readDescriptor)
+            guard frame.kind == .control else { continue }
+            switch try decodeControl(frame.payload) {
+            case .chief(let payload): return payload
+            case .error(let payload): throw TermiodClientError.requestFailed(payload.message)
+            default: continue
+            }
+        }
+    }
+
     /// The daemon's answer to "what is running?" — which, to be honest, has to
     /// include what *was* running: a daemon that died takes every session with
     /// it, and a live list alone would report that as "nothing". The tombstones
@@ -1387,6 +1427,19 @@ final class TermiodSessionLink: @unchecked Sendable {
     /// a release that dropped the lock first could be overtaken by the next `D`
     /// frame, and that order is the whole point of the hold.
     private let outputLock = NSLock()
+    private var receivedScreenOutput = false
+
+    var hasReceivedScreenOutput: Bool {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        return receivedScreenOutput
+    }
+
+    // Called under outputLock, after any keyframe hold has released these bytes.
+    private func emitScreenOutput(_ data: Data) {
+        onOutput?(data)
+        if !data.isEmpty { receivedScreenOutput = true }
+    }
     /// A keyframe waiting for the surface to reach its grid, and the bytes
     /// queued behind it. Guarded by `outputLock`.
     private var hold: TerminalKeyframeHold
@@ -1892,7 +1945,7 @@ final class TermiodSessionLink: @unchecked Sendable {
                 return
             }
             let (paint, painted) = hold.surfaceReached(size)
-            for chunk in paint { onOutput?(chunk) }
+            for chunk in paint { emitScreenOutput(chunk) }
             outputLock.unlock()
             let changed = surfaceGrid != size
             surfaceGrid = size
@@ -1946,7 +1999,7 @@ final class TermiodSessionLink: @unchecked Sendable {
     private func deliverOutput(_ data: Data) {
         outputLock.lock()
         let outcome = hold.receive(output: data, limit: Self.keyframeHoldByteLimit)
-        for chunk in outcome.emit { onOutput?(chunk) }
+        for chunk in outcome.emit { emitScreenOutput(chunk) }
         outputLock.unlock()
         guard outcome.gaveUp else { return }
         Log.termiod.info("""
@@ -1969,7 +2022,7 @@ final class TermiodSessionLink: @unchecked Sendable {
             rows: UInt16(clamping: frame.rows), cols: UInt16(clamping: frame.cols))
         let repaint = TermiodSnapshot.render(frame)
         outputLock.lock()
-        for chunk in hold.receive(keyframe: repaint, at: grid) { onOutput?(chunk) }
+        for chunk in hold.receive(keyframe: repaint, at: grid) { emitScreenOutput(chunk) }
         let waiting = hold.isHolding
         let epoch = hold.epoch
         outputLock.unlock()
@@ -2291,7 +2344,8 @@ final class TermiodSessionLink: @unchecked Sendable {
         // the last screen with it. Paint it: an imperfectly wrapped final frame
         // beats a blank one.
         outputLock.lock()
-        for chunk in hold.release() { onOutput?(chunk) }
+        for chunk in hold.release() { emitScreenOutput(chunk) }
+        receivedScreenOutput = false
         outputLock.unlock()
     }
 

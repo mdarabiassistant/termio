@@ -28,6 +28,13 @@ struct AgentDefinition: Identifiable {
     /// stable enough to wire to a one-click toggle (the free-text command override
     /// still accepts any flag). Composed on by `AppSettings.command(for:)`.
     let permissionBypassFlag: String?
+    /// How this agent takes a first prompt on its command line, `{prompt}` marking
+    /// where the shell-quoted text goes (`-- {prompt}`). A session started with a
+    /// prompt gets it there, so the agent holds it through whatever it asks at
+    /// startup — a folder-trust question, a hooks review — and submits it itself;
+    /// typed keys would answer that question instead. `nil` when the agent takes
+    /// none: its prompt is then typed once its screen settles.
+    let promptArgument: String?
     /// How (and whether) a relaunch resumes this agent's prior conversation.
     let resumeSpec: ResumeSpec
     let icon: AgentIcon
@@ -106,7 +113,7 @@ struct AgentDefinition: Identifiable {
     /// fallback don't each have to spell them out.
     init(
         id: String, order: Int = Self.unorderedRank, displayName: String, command: String?,
-        permissionBypassFlag: String?,
+        permissionBypassFlag: String?, promptArgument: String? = nil,
         resumeSpec: ResumeSpec, icon: AgentIcon,
         iconRef: TermioShared.IconRef, tint: Color, tintHex: String?, installURL: URL?, wireName: String,
         statusRules: AgentStatusRules? = nil, titleRules: AgentStatusRules? = nil,
@@ -119,6 +126,7 @@ struct AgentDefinition: Identifiable {
         self.displayName = displayName
         self.command = command
         self.permissionBypassFlag = permissionBypassFlag
+        self.promptArgument = promptArgument
         self.resumeSpec = resumeSpec
         self.icon = icon
         self.iconRef = iconRef
@@ -872,6 +880,10 @@ struct AgentManifest: Decodable {
     var wire: String?
     var command: String?
     var permissionBypassFlag: String?
+    /// See `AgentDefinition.promptArgument`. Read by the app alone, which composes
+    /// launch commands; the daemon declares it only so a malformed value fails on
+    /// both sides.
+    var promptArgument: String?
     var resume: ResumeConfig?
     var install: String?
     /// Accepted while Cut 4 migrates manifests written against the earlier RFC.
@@ -1099,6 +1111,20 @@ struct AgentManifest: Decodable {
             throw ManifestError.invalid("\(id): skills require 'dir'")
         }
         return dir
+    }
+
+    /// The `promptArgument` pattern, or nil when it has nowhere to put the prompt.
+    /// Logged and set aside rather than thrown: the daemon reads this manifest too
+    /// and has no use for the field, so failing the whole agent here would make
+    /// the two disagree about whether it exists. Its prompts are typed instead.
+    private func resolvedPromptArgument() -> String? {
+        guard let pattern = promptArgument?.trimmingCharacters(in: .whitespaces),
+              !pattern.isEmpty else { return nil }
+        guard pattern.contains("{prompt}") else {
+            Log.app.error("\(id, privacy: .public): promptArgument has no {prompt}; its prompts are typed")
+            return nil
+        }
+        return pattern
     }
 
     /// Validates the `configHome` block, and checks that it actually is the home
@@ -1357,7 +1383,7 @@ struct AgentManifest: Decodable {
         return AgentDefinition(
             id: id, order: order ?? AgentDefinition.unorderedRank,
             displayName: name, command: command,
-            permissionBypassFlag: permissionBypassFlag,
+            permissionBypassFlag: permissionBypassFlag, promptArgument: resolvedPromptArgument(),
             resumeSpec: resumeSpec, icon: resolvedIcon, iconRef: resolvedIconRef,
             tint: resolvedTint, tintHex: resolvedTintHex,
             installURL: (install ?? installURL).flatMap(URL.init(string:)), wireName: wire ?? id,

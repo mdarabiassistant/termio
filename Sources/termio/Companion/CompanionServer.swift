@@ -198,6 +198,9 @@ final class CompanionServer {
     private let startSession: (String, String?) -> (sessionID: String, agentID: String)?
     private let stopSession: (String) -> Bool
     private let renameSession: (String, String, @escaping (Result<Void, Error>) -> Void) -> Void
+    private let sendToChief: (String, String) async -> CompanionControl
+    private let latestChiefNotice: () -> WireNotice?
+    private let pairingToken: () -> String
     /// Opens a plain shell in the loose terminals funnel for the phone's
     /// Terminals ＋ (`.startTerminal`); returns the `.started` echo, or nil on
     /// failure. Project-less: the funnel is found-or-created on the Mac, in the
@@ -239,7 +242,10 @@ final class CompanionServer {
         stopSession: @escaping (String) -> Bool,
         startScratchTerminal: @escaping (String?) -> (sessionID: String, agentID: String)?,
         startSSHSession: @escaping (String, String?) -> (sessionID: String, agentID: String)?,
-        renameSession: @escaping (String, String, @escaping (Result<Void, Error>) -> Void) -> Void
+        renameSession: @escaping (String, String, @escaping (Result<Void, Error>) -> Void) -> Void,
+        sendToChief: @escaping (String, String) async -> CompanionControl,
+        latestChiefNotice: @escaping () -> WireNotice?,
+        pairingToken: @escaping () -> String = { PairingToken.current }
     ) {
         self.port = port
         self.rosterProvider = rosterProvider
@@ -249,6 +255,9 @@ final class CompanionServer {
         self.startScratchTerminal = startScratchTerminal
         self.startSSHSession = startSSHSession
         self.renameSession = renameSession
+        self.sendToChief = sendToChief
+        self.latestChiefNotice = latestChiefNotice
+        self.pairingToken = pairingToken
     }
 
     func start() {
@@ -423,8 +432,8 @@ final class CompanionServer {
 
     private func handle(_ control: CompanionControl, on connection: NWConnection) {
         let id = ObjectIdentifier(connection)
-        if case .auth(let token, let wire) = control {
-            guard token == PairingToken.current else {
+        if case .auth(let token, let wire, let lastNoticeID) = control {
+            guard token == pairingToken() else {
                 refuse(
                     connection, message: "unauthorized — re-scan the QR code on your Mac",
                     code: WireRefusal.unauthorized)
@@ -439,6 +448,10 @@ final class CompanionServer {
             }
             authenticatedWireByConnection[id] = wire
             send(rosterProvider(), to: connection)
+            if wire >= Wire.chiefOfStaff,
+               let notice = latestChiefNotice(), notice.id != lastNoticeID {
+                sendControl(.notice(notice), to: connection)
+            }
             return
         }
         guard authenticatedWireByConnection[id] != nil else {
@@ -448,6 +461,19 @@ final class CompanionServer {
             return
         }
         switch control {
+        case .send(let sessionID, let text):
+            guard (authenticatedWireByConnection[id] ?? Wire.legacy) >= Wire.chiefOfStaff else {
+                sendControl(.error(message: "Update Termio on your phone to talk to the Chief of Staff.",
+                                   code: WireRefusal.clientTooOld), to: connection)
+                return
+            }
+            Task { [weak self, weak connection] in
+                guard let self, let connection,
+                      self.authenticatedWireByConnection[id] != nil else { return }
+                let reply = await self.sendToChief(sessionID, text)
+                guard self.authenticatedWireByConnection[id] != nil else { return }
+                self.sendControl(reply, to: connection)
+            }
         case .attach(let sessionID):
             guard let link = attachSession(sessionID) else {
                 sendControl(.error(message: "unknown session — pull the list to refresh"), to: connection)
@@ -556,7 +582,7 @@ final class CompanionServer {
             Log.companion.notice(
                 "ignoring unsupported control \(Self.loggableTag(type), privacy: .public)"
             )
-        case .auth, .exit, .grid, .error, .started, .sessionRenamed, .fileList, .file, .written, .uploaded,
+        case .auth, .sent, .notice, .exit, .grid, .error, .started, .sessionRenamed, .fileList, .file, .written, .uploaded,
              .searchResults, .sshConfigList, .changes, .diff:
             break
         }
@@ -1015,6 +1041,14 @@ final class CompanionServer {
         )
     }
 
+    func publishNotice(_ notice: WireNotice) {
+        // Terminal viewers need notices too; only roster updates skip bridges.
+        for (id, connection) in connectionByID
+        where (authenticatedWireByConnection[id] ?? Wire.legacy) >= Wire.chiefOfStaff {
+            sendControl(.notice(notice), to: connection)
+        }
+    }
+
     private func broadcastIfChanged() {
         guard !connectionByID.isEmpty else { return }
         let roster = rosterProvider()
@@ -1396,15 +1430,20 @@ extension TermioStore {
     /// phone's row preview, empty meaning "nothing to say".
     private func rosterSession(_ session: Session) -> RosterSession {
         let activity = statusDescription(for: session.id)
+        let subtitle = isChiefOfStaff(session.id) && connectionNotice(for: session.id) == nil
+            && agentExitNotice(for: session.id) == nil
+            ? chiefOfStaffNotice?.body ?? activity : activity
         return RosterSession(
             id: session.id.uuidString,
             title: displayTitle(for: session),
             agent: Self.wireAgent(session.agent),
             status: Self.wireStatus(status(for: session.id)),
-            subtitle: activity.isEmpty ? nil : activity,
+            subtitle: subtitle.isEmpty ? nil : subtitle,
             // Worktree sessions ride the project's flat roster, so the checkout's
             // branch is the phone's only clue that a row lives off the main one.
-            branch: session.worktreePath.flatMap { branch(forFolder: $0) }
+            branch: session.worktreePath.flatMap { branch(forFolder: $0) },
+            role: session.role?.rawValue,
+            ready: isChiefOfStaff(session.id) ? chiefOfStaff.agentReady : nil
         )
     }
 

@@ -152,6 +152,10 @@ extension TermioStore {
         lastHookReportAt[id] = nil
         agentExitStreaks[id] = nil
         blockingAttention.remove(id)
+        launchPrompts[id] = nil
+        launchesAwaitingStart.removeValue(forKey: id)
+        heldAtStartup.remove(id)
+        parkedExits[id] = nil
     }
 
     /// Light the "blocked on you" dot from a genuine, observable blocking condition
@@ -164,8 +168,11 @@ extension TermioStore {
     /// showing gets *upgraded* to blocking when the real signal arrives.
     func flagBlockingAttention(for id: Session.ID) {
         guard !isViewing(id) else { return }
+        let upgradesABell = status(for: id) == .needsAttention && !blockingAttention.contains(id)
         blockingAttention.insert(id)
         setStatus(.needsAttention, for: id)
+        // The status write above is a no-op then, so the feed hears it here.
+        if upgradesABell { noteBlockingUpgradeForChiefOfStaff(id) }
     }
 
     /// Reclassifies a shell-backed session to whatever agent runs in its foreground —

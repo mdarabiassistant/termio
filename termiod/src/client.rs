@@ -352,6 +352,7 @@ pub async fn set_status(
     match request(&Control::SetStatus {
         id: id.to_string(),
         status: status.to_string(),
+        agent_processes: details.agent_processes,
         title,
         transcript_path: details.transcript_path,
         conversation_id: details.conversation_id,

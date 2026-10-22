@@ -35,7 +35,8 @@ usage:
   termio sessions close <session> [...]      close session tabs
   termio sessions focus <session>            select the session in the app
 
-  termio notify [--title T] "<message>"      post a macOS notification (e.g. "I'm done")
+  termio notify [--title T] [--session <s>] "<message>"
+                                             post a macOS notification (e.g. "I'm done")
 
   termio remote <verb> [...]                 drive a box's termiod over SSH (deploy, list,
                                              attach, open — `termio remote --help` lists them)
@@ -50,6 +51,9 @@ options:
   --direction <d>  for `spawn`/`run`: where the new pane lands relative to yours — right or down
   --ratio <0..1>   for `spawn`/`run`: the new pane's share of the split (e.g. 0.25);
                    a stated ratio holds against later spawns
+  --cwd <place>    for `spawn`/`run`: start in a folder, `[machine:]path` (`devbox:~/src/api`);
+                   the Chief of Staff's, which starts sessions outside any one project
+  --project <p>    for `spawn`/`run`: start in a project, by name or path (Chief of Staff)
   --wait           for `spawn`/`run`/`send`: block until the turn settles; the reply carries
                    the final status and the transcript line range to read
                    (exit 0 settled, 1 error — including a stalled/vanished session, 3 timed out)
@@ -112,6 +116,7 @@ EOF
         spawn) cat <<'EOF'
 usage: termio sessions spawn "<prompt>" [--agent <id>] [--direction right|down]
                                         [--ratio <0..1>] [--wait [--timeout <ms>]] [--json]
+       termio sessions spawn "<prompt>" --cwd [machine:]path | --project <p> [--agent <id>]
 
 Start a NEW agent session on the prompt. Replies immediately with the new
 session's termio://session link; the prompt is
@@ -122,6 +127,11 @@ pi); the default is the calling agent's own kind.
 the automatic stack; --ratio is the new pane's share of the split (e.g. 0.25
 for a short strip) and holds against later spawns. Panes without a stated
 ratio share their run evenly.
+
+--cwd and --project start the session somewhere else, as a tab of its own that
+takes no focus: a folder on this Mac, `machine:path` on another machine
+Termio knows (`devbox:~/src/api`), or a project by name or path. Only the
+Chief of Staff may name a place; any other caller stays in its own project.
 
 Readiness is judged from the screen, so an agent sitting on a startup gate —
 a trust prompt, a usage notice, a first-run dialog — looks ready while it is
@@ -147,6 +157,7 @@ EOF
         run) cat <<'EOF'
 usage: termio sessions run "<command>" [--direction right|down] [--ratio <0..1>]
                                        [--wait [--timeout <ms>]] [--json]
+       termio sessions run "<command>" --cwd [machine:]path | --project <p>    (Chief of Staff)
 
 Start a NEW plain terminal session and type the shell command into it — a
 dev server, a test run, a build — visible in a split pane, no LLM involved.
@@ -428,6 +439,8 @@ sessions() {
     agent=""
     direction=""
     ratio=""
+    place_cwd=""
+    place_project=""
     targets=""
     text=""
     states=""
@@ -480,6 +493,12 @@ sessions() {
                     *) echo "termio: --ratio needs a number between 0 and 1 (e.g. 0.25)" >&2; exit 1 ;;
                 esac
                 ratio="$2"; shift ;;
+            --cwd)
+                [ $# -ge 2 ] || { echo "termio: --cwd needs a folder: [machine:]path" >&2; exit 1; }
+                place_cwd="$2"; shift ;;
+            --project)
+                [ $# -ge 2 ] || { echo "termio: --project needs a project name or path" >&2; exit 1; }
+                place_project="$2"; shift ;;
             --state)
                 [ $# -ge 2 ] || { echo "termio: --state needs a value" >&2; exit 1; }
                 states="$2"; shift ;;
@@ -576,6 +595,17 @@ sessions() {
         esac
         [ -n "$direction" ] && extra_json="${extra_json:+$extra_json,}\"direction\":\"$direction\""
         [ -n "$ratio" ] && extra_json="${extra_json:+$extra_json,}\"ratio\":$ratio"
+    fi
+
+    # A place says where a new session starts instead of beside the caller. Only
+    # the Chief of Staff may name one; the app refuses it from anyone else.
+    if [ -n "$place_cwd" ] || [ -n "$place_project" ]; then
+        case "$op" in
+            spawn|run) ;;
+            *) echo "termio: --cwd/--project apply to spawn and run only" >&2; exit 1 ;;
+        esac
+        [ -n "$place_cwd" ] && extra_json="${extra_json:+$extra_json,}\"place_cwd\":\"$(json_escape "$place_cwd")\""
+        [ -n "$place_project" ] && extra_json="${extra_json:+$extra_json,}\"place_project\":\"$(json_escape "$place_project")\""
     fi
 
     # --no-enter only reads on a send to an existing session: a spawn's prompt has
@@ -753,6 +783,7 @@ agent() {
 notify() {
     format=text
     title=""
+    about=""
     body=""
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -760,15 +791,19 @@ notify() {
             --title)
                 [ $# -ge 2 ] || { echo "termio: --title needs a value" >&2; exit 1; }
                 title="$2"; shift ;;
+            --session)
+                [ $# -ge 2 ] || { echo "termio: --session needs a session link or id" >&2; exit 1; }
+                about="$2"; shift ;;
             -h|--help)
                 cat <<'EOF'
-usage: termio notify [--title T] "<message>" [--json]
+usage: termio notify [--title T] [--session <session>] "<message>" [--json]
 
 Post a macOS notification from the running app. The agent uses this to ping you
 directly — "build finished", "need a decision" — regardless of whether termio is
 frontmost (unlike the automatic completion banner). --title overrides the default
 (the calling agent's name); the banner's subtitle is the project, and clicking it
-focuses the session that posted it.
+focuses the session that posted it — or, with --session, the session the notice
+is about.
 EOF
                 exit 0 ;;
             *) body="${body:+$body }$1" ;;
@@ -785,6 +820,7 @@ EOF
     fi
     extra=""
     [ -n "$title" ] && extra="\"title\":\"$(json_escape "$title")\""
+    [ -n "$about" ] && extra="${extra:+$extra,}\"about\":\"$(json_escape "$about")\""
     request_once notify "$format" "" "" "$body" "$extra"
 }
 

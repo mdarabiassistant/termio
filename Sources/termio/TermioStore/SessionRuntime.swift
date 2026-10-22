@@ -23,6 +23,9 @@ import TermioShared
 final class SessionRuntime {
     /// Live status, driven by agent hooks / screen detection (see `TermioStore+AgentStatus`).
     var status: SessionStatus = .idle
+    /// When `status` last changed, for `sessions list --json`'s `status_since`.
+    /// No view reads it, so it stays out of observation.
+    @ObservationIgnored var statusSince: Date?
     /// The tool a `.working` session is currently running (`PreToolUse.tool_name`),
     /// shown in the status tooltip; `nil` once the turn ends.
     var currentTool: String?

@@ -146,6 +146,12 @@ struct SidebarView: View {
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
             }
+            // The Chief of Staff spans every machine below, so it sits above them
+            // all; its second line is the last thing it told you, as on the phone.
+            if let chief = store.chiefOfStaffID.flatMap({ store.session($0) }) {
+                SessionRow(session: chief, chrome: nil, leadingIndent: 0,
+                           subtitle: store.chiefOfStaffNotice?.body, marksDevice: false)
+            }
             ForEach(machines) { machine in
                 machineHeader(machine)
                 if !collapsedMachines.contains(machine.id) {
@@ -253,7 +259,10 @@ private struct WorkspaceSidebarRows: View {
                 return true
             }.map { PinnedSessionEntry(project: project, session: $0) }
         }
-        pinnedSessions += (workspace.terminals + workspace.chats)
+        // The Chief of Staff is filed among this workspace's chats but drawn once,
+        // above every machine (see `SidebarView`), so it is left out of the rows here.
+        let chats = workspace.chats.filter { $0.role != .chief }
+        pinnedSessions += (workspace.terminals + chats)
             .filter(\.pinned)
             .map { PinnedSessionEntry(project: nil, session: $0) }
         // Agents blocked on the user in *other* workspaces, lifted into the working
@@ -274,7 +283,7 @@ private struct WorkspaceSidebarRows: View {
         let hasPinned = !pinnedProjects.isEmpty || !pinnedWorktrees.isEmpty
             || !pinnedSessions.isEmpty || !waitingElsewhere.isEmpty
         let hasTerminals = !workspace.terminals.isEmpty
-        let hasChats = !workspace.chats.isEmpty
+        let hasChats = !chats.isEmpty
         return Group {
             // The top "Pinned" working set, under its own section header: pinned projects
             // as full blocks, then pinned worktrees as mini-blocks (header + their
@@ -363,8 +372,8 @@ private struct WorkspaceSidebarRows: View {
                     ]
                 )
                 if !chatsCollapsed {
-                    let marks = splitLinkMarks(for: workspace.chats)
-                    ForEach(workspace.chats) { session in
+                    let marks = splitLinkMarks(for: chats)
+                    ForEach(chats) { session in
                         SessionRow(session: session, chrome: chrome, splitLink: marks[session.id],
                                    marksDevice: marksDevice)
                     }
@@ -402,7 +411,7 @@ private struct WorkspaceSidebarRows: View {
                 .filter { $0.workspaceID == workspace.id }
                 .flatMap(\.sessions)
             return (loose + filed)
-                .filter { store.status(for: $0.id) == .needsAttention }
+                .filter { $0.role != .chief && store.status(for: $0.id) == .needsAttention }
                 .map { WaitingElsewhereEntry(workspaceName: workspace.name, session: $0) }
         }
     }
@@ -1351,6 +1360,10 @@ private struct SessionRow: View {
     /// origin trail (e.g. "web-app" or "web-app/feat") that says where the real row
     /// lives. `nil` for a row in its normal tree spot.
     var breadcrumb: String? = nil
+    /// A second line the row's owner supplies — the Chief of Staff's last notice.
+    /// A link that is down or an agent that exited outranks it, since either
+    /// changes what the pane shows.
+    var subtitle: String? = nil
     /// Whether rows in this column carry a device mark at all. Answered once per
     /// render by the list (a machine's own workspace marks nothing), because the
     /// question is about the workspace on screen, not about this row — asking it
@@ -1489,9 +1502,9 @@ private struct SessionRow: View {
                 // exited — shell"): the row says what happened in its own place
                 // instead of changing identity (#528). A link that is down
                 // outranks it — while that is true the pane is not showing the
-                // session at all.
+                // session at all. Either outranks the owner's `subtitle`.
                 if let notice = store.connectionNotice(for: session.id)
-                    ?? store.agentExitNotice(for: session.id) {
+                    ?? store.agentExitNotice(for: session.id) ?? subtitle {
                     Text(notice)
                         .font(settings.interfaceFont)
                         .foregroundStyle(.secondary)

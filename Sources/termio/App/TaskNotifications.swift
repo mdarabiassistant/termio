@@ -109,6 +109,10 @@ final class TaskNotificationCenter: NSObject {
         let agent = store.effectiveAgent(for: session)
         // Only real agent turns notify; a plain terminal's bell/OSC noise doesn't.
         guard agent != .terminal else { return }
+        // The Chief of Staff speaks through its own notices (`termio notify`), and a
+        // turn of yours that ends without one has its own fallback; a completion
+        // banner on top would say the same thing twice.
+        guard session.role != .chief else { return }
         // The notification's one job is "you stepped away, come back" — the
         // policy Cursor and Codex both ship (`unfocused`-only). While termio is
         // frontmost, the sidebar dot and menu-bar pulse are the completion

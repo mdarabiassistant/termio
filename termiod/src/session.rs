@@ -372,6 +372,7 @@ struct Session {
     title: Option<String>,
     custom_name: Option<String>,
     custom_name_revision: u64,
+    role: Option<String>,
     workstream: Option<WorkstreamSpec>,
     pty: Arc<Pty>,
     /// A dedicated writer prevents blocked PTY writes from stalling reads.
@@ -424,6 +425,7 @@ struct Session {
     /// `info()` reads this cache so a roster request never turns into a burst
     /// of syscalls.
     foreground: Foreground,
+    agent_process: Option<crate::proc::AgentProcess>,
     /// A resize's barrier, opened but not yet captured. See
     /// `begin_resize_snapshot_barrier`.
     resize_capture: Option<ResizeCapture>,
@@ -453,6 +455,10 @@ impl Session {
             created_unix: self.created_unix,
             alive: true,
             status: self.status.clone(),
+            agent_ready: Some(self.agent_process.as_ref().is_some_and(|agent| {
+                self.pty.foreground_pgid() == Some(agent.pgid)
+            })),
+            status_blocking: Some(self.status_engine.blocking_attention()),
             agent_id: self.workstream.as_ref().map(|w| w.agent_id.clone()),
             // A session created by a client names its project; one started by
             // hand on this box carries none, so the checkout its child is
@@ -470,6 +476,7 @@ impl Session {
             title: self.title.clone(),
             custom_name: self.custom_name.clone(),
             custom_name_revision: self.custom_name_revision,
+            role: self.role.clone(),
             attached_clients: self.clients.len(),
             writer_client_id: self.writer.as_ref().map(ClientId::to_string),
             foreground_pid: self.foreground.current().pid,
@@ -478,6 +485,15 @@ impl Session {
             child_cwd: self.foreground.current().cwd.clone(),
             child_executable: self.foreground.executable_path(),
             child_executable_replaced: self.foreground.executable_replaced(),
+        }
+    }
+
+    fn expire_agent_readiness(&mut self) {
+        if self.agent_process.as_ref().is_some_and(|agent| {
+            self.pty.foreground_pgid() != Some(agent.pgid)
+                || self.foreground.current().process.as_ref().is_some_and(|current| current != agent)
+        }) {
+            self.agent_process = None;
         }
     }
 
@@ -538,6 +554,7 @@ impl Session {
                 title: self.title.clone(),
                 custom_name: self.custom_name.clone(),
                 custom_name_revision: self.custom_name_revision,
+                role: self.role.clone(),
                 workstream: self.workstream.clone(),
                 // Assigned by `handoff::pack`, at the moment this session is
                 // committed to the blob.
@@ -1793,6 +1810,7 @@ pub fn spawn(
     rows: u16,
     cols: u16,
     workstream: Option<WorkstreamSpec>,
+    role: Option<String>,
     on_exit: mpsc::UnboundedSender<SessionEnded>,
     events: broadcast::Sender<Event>,
 ) -> anyhow::Result<SessionHandle> {
@@ -1830,6 +1848,7 @@ pub fn spawn(
             title: None,
             custom_name: None,
             custom_name_revision: 0,
+            role,
             workstream,
             status_clocks: None,
         },
@@ -1877,6 +1896,7 @@ pub fn adopt(
             title: carried.title,
             custom_name: carried.custom_name,
             custom_name_revision: carried.custom_name_revision,
+            role: carried.role,
             workstream: carried.workstream,
             status_clocks: carried.status_clocks,
         },
@@ -1946,6 +1966,7 @@ struct Facts {
     title: Option<String>,
     custom_name: Option<String>,
     custom_name_revision: u64,
+    role: Option<String>,
     workstream: Option<WorkstreamSpec>,
     /// How long the carried status has been true. `None` for a fresh spawn,
     /// which has no history to keep.
@@ -1997,6 +2018,7 @@ fn start(
         title: facts.title,
         custom_name: facts.custom_name,
         custom_name_revision: facts.custom_name_revision,
+        role: facts.role,
         workstream: facts.workstream,
         pty,
         input_tx,
@@ -2021,6 +2043,7 @@ fn start(
         ),
         transcript_path: None,
         foreground: Foreground::default(),
+        agent_process: None,
         resize_capture: None,
     };
     // A carried or created session arrives with a status this actor did not
@@ -2397,12 +2420,14 @@ async fn run(
             }
             _ = foreground_poll.tick() => {
                 if session.foreground.poll(&session.pty, session.pid, &foreground_tx) {
+                    session.expire_agent_readiness();
                     session.refresh_status_facts();
                     session.emit_roster();
                 }
             }
             Some(resolution) = foreground_rx.recv() => {
                 if session.foreground.apply(resolution) {
+                    session.expire_agent_readiness();
                     // A hand-started agent becomes an agent here, which is when
                     // its rules start applying. A demotion back to the shell is
                     // the same edge run backwards.
@@ -2920,6 +2945,14 @@ fn handle_msg(session: &mut Session, msg: SessionMsg) -> Option<EndReason> {
             details,
             reply,
         } => {
+            if matches!(status.as_str(), "working" | "idle" | "needs_you" | "done" | "failed") {
+                if let Some(agent) = details.agent_processes.iter().find(|agent| {
+                    session.pty.foreground_pgid() == Some(agent.pgid)
+                }) {
+                    session.agent_process = Some(agent.clone());
+                    session.emit_roster();
+                }
+            }
             if title.is_some() {
                 session.title = title;
             }
@@ -2951,7 +2984,15 @@ fn handle_msg(session: &mut Session, msg: SessionMsg) -> Option<EndReason> {
             let _ = reply.send(());
         }
         SessionMsg::Info { reply } => {
-            let _ = reply.send(session.info());
+            let mut information = session.info();
+            let agent = session.agent_process.clone();
+            // Fresh proof on every roster read, without blocking PTY delivery.
+            // A process that exited between poll ticks cannot leave Talk ready.
+            tokio::task::spawn_blocking(move || {
+                information.agent_ready = Some(information.agent_ready == Some(true)
+                    && agent.as_ref().is_some_and(crate::proc::AgentProcess::is_current));
+                let _ = reply.send(information);
+            });
         }
         // Intercepted in `run` before it reaches here: handing a session over
         // ends the actor without ending the session, which is not something a
@@ -3248,6 +3289,7 @@ mod tests {
                 title: None,
                 custom_name: None,
                 custom_name_revision: 0,
+                role: None,
                 workstream: None,
                 pty,
                 input_tx,
@@ -3268,6 +3310,7 @@ mod tests {
                 ),
                 transcript_path: None,
                 foreground: super::Foreground::default(),
+                agent_process: None,
                 resize_capture: None,
             },
             event_rx,
@@ -4511,6 +4554,7 @@ mod tests {
             title: None,
             custom_name: None,
             custom_name_revision: 0,
+            role: None,
             workstream: None,
             pty,
             input_tx,
@@ -4544,6 +4588,7 @@ mod tests {
             ),
             transcript_path: None,
             foreground: super::Foreground::default(),
+                agent_process: None,
             resize_capture: None,
         };
 
@@ -4622,6 +4667,7 @@ mod tests {
             24,
             80,
             None,
+            None,
             on_exit,
             events,
         )
@@ -4661,6 +4707,7 @@ mod tests {
             ],
             24,
             80,
+            None,
             None,
             on_exit,
             events,
@@ -5073,6 +5120,38 @@ mod tests {
         _on_exit: mpsc::UnboundedReceiver<super::SessionEnded>,
     }
 
+    #[tokio::test]
+    async fn readiness_needs_no_attachment_and_expires_when_the_agent_execs() {
+        let (handle, _events, _exits) = start_session(
+            vec!["/bin/sh".into(), "-c".into(), "read line; exec sleep 30".into()], "/");
+        let initial = settled_info(&handle, |info| info.foreground_pid.is_some()).await;
+        assert_eq!(initial.agent_ready, Some(false));
+        let agent = crate::proc::AgentProcess::read(initial.foreground_pid.unwrap()).unwrap();
+        let foreign = crate::proc::AgentProcess::read(std::process::id() as i32).unwrap();
+        let (reply, answer) = oneshot::channel();
+        handle.send(SessionMsg::SetStatus {
+            status: "idle".into(), title: None,
+            details: crate::protocol::StatusDetails { agent_processes: vec![foreign.clone()], ..Default::default() },
+            reply,
+        });
+        answer.await.unwrap();
+        assert_eq!(settled_info(&handle, |_| true).await.agent_ready, Some(false));
+        let (reply, answer) = oneshot::channel();
+        handle.send(SessionMsg::SetStatus {
+            status: "idle".into(), title: None,
+            details: crate::protocol::StatusDetails { agent_processes: vec![foreign, agent], ..Default::default() },
+            reply,
+        });
+        answer.await.unwrap();
+        let ready = settled_info(&handle, |info| info.agent_ready == Some(true)).await;
+        assert_eq!(ready.attached_clients, 0, "readiness belongs to the agent, not an attachment");
+        handle.send(SessionMsg::Inject { data: b"continue\n".to_vec() });
+        let ended = settled_info(&handle, |info| info.foreground_argv.as_ref()
+            .is_some_and(|argv| argv.first().is_some_and(|name| name.ends_with("sleep")))).await;
+        assert_eq!(ended.agent_ready, Some(false), "the same pid execed into another process");
+        handle.send(SessionMsg::Kill { reason: EndReason::Killed });
+    }
+
     async fn attached_session() -> Attached {
         let (handle, events, on_exit) = start_session(vec!["/bin/sh".to_string()], "/");
         let (client_tx, client_rx) = mpsc::unbounded_channel();
@@ -5194,6 +5273,7 @@ mod tests {
                 project: "/Users/someone/code/termio".to_string(),
                 worktree: None,
             }),
+            Some("chief".to_string()),
             on_exit,
             events,
         )
@@ -5204,6 +5284,8 @@ mod tests {
         let info = rx.await.expect("session info");
         assert_eq!(info.agent_id.as_deref(), Some("claude"));
         assert_eq!(info.project.as_deref(), Some("/Users/someone/code/termio"));
+        // The role a client created the session with reaches every roster.
+        assert_eq!(info.role.as_deref(), Some("chief"));
 
         handle.send(SessionMsg::Kill {
             reason: EndReason::Killed,

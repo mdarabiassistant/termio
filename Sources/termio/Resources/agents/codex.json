@@ -5,6 +5,7 @@
   "wire": "codex",
   "command": "codex",
   "permissionBypassFlag": "--dangerously-bypass-approvals-and-sandbox",
+  "promptArgument": "-- {prompt}",
   "resume": {
     "resume": "resume {id}",
     "discover": {

@@ -51,6 +51,7 @@ from the real front matter).
 | active | research | [Reading list: PTYs, SSH, and detachable remote terminals](READING.md) |
 | active | rfc | [可扩展 Agent —— 配置化定义 + 配置化 Hook](design/20260707-agent-extensibility.md) |
 | active | rfc | [Agent integration moves into termiod](design/20260825-agent-integration-moves-to-termiod.md) |
+| active | rfc | [Chief of Staff — one agent you talk to that routes work across every session](design/20261019-chief-of-staff.md) |
 | active | rfc | [One path — local sessions run through termiod too](design/20260817-one-path-local-through-termiod.md) |
 | active | rfc | [One place decides what paste means](design/20260919-one-place-decides-what-paste-means.md) |
 | active | rfc | [PTY size is not the write token](design/20260901-pty-size-is-not-the-write-token.md) |
