@@ -21,6 +21,38 @@ import XCTest
 /// to state the ordering as a fact rather than as a race that usually goes the
 /// right way.
 final class TermiodWatchOrderingTests: XCTestCase {
+    func testStatusWatchOrdersAckAndDropsDuplicateAndOlderBatchesAcrossAHole() throws {
+        let seen = SinceBox()
+        let established = expectation(description: "status baseline and early batch")
+        let reader = EventReader()
+        func status(_ seq: UInt64) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "ev": "status_changed", "resource": "status:", "seq": seq,
+                "session": "owned-test-session", "status": "done", "source": "hook",
+            ])
+        }
+        let early = try status(11)
+        let watch = Termiod.ResourceWatch(route: .local, caps: ["resources"], resource: "status:",
+            subscribing: { resource, since, onEvent, _ in
+                XCTAssertNil(since)
+                reader.source = onEvent
+                onEvent(early)
+                return (.unattached(resource: resource), true, 10)
+            }, onStatus: { value in
+                seen.append(value.seq)
+                if value.seq == 11 { established.fulfill() }
+            }, onUpdate: { update in
+                if case .established(let cursor) = update { seen.append(cursor) }
+            })
+        wait(for: [established], timeout: 5)
+        reader.deliver(try status(13))
+        reader.deliver(try status(13))
+        reader.deliver(try status(12))
+        reader.deliver(try status(10))
+        XCTAssertEqual(seen.value, [10, 11, 13])
+        withExtendedLifetime(watch) {}
+    }
+
     /// The spelling the client asks with, and the one the host answers with —
     /// `/var` against `/private/var` is this platform's own version of it.
     private let asked = "fs:/var/checkout"

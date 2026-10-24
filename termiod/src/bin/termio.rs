@@ -197,6 +197,16 @@ struct Placement {
     /// against later spawns.
     #[arg(long, value_name = "0..1", value_parser = parse_ratio)]
     ratio: Option<String>,
+
+    /// Start in a folder instead of beside your pane: `[machine:]path`
+    /// (`devbox:~/src/api`). Only the Chief of Staff may name a place.
+    #[arg(long, value_name = "[MACHINE:]PATH")]
+    cwd: Option<String>,
+
+    /// Start in a project, by name or path. Only the Chief of Staff may name
+    /// a place.
+    #[arg(long, value_name = "PROJECT")]
+    project: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -355,6 +365,11 @@ struct NotifyArgs {
     /// Override the banner's title (the default is the calling agent's name).
     #[arg(long, value_name = "TITLE")]
     title: Option<String>,
+
+    /// The session the notice is about; clicking the banner opens it instead
+    /// of the session that posted it.
+    #[arg(long, value_name = "SESSION")]
+    session: Option<String>,
 
     #[command(flatten)]
     output: Output,
@@ -846,6 +861,12 @@ fn placement(extra: &mut String, placement: &Placement) {
     if let Some(ratio) = &placement.ratio {
         push(extra, &format!("\"ratio\":{ratio}"));
     }
+    if let Some(cwd) = &placement.cwd {
+        push(extra, &format!("\"place_cwd\":\"{}\"", app_socket::json_escape(cwd)));
+    }
+    if let Some(project) = &placement.project {
+        push(extra, &format!("\"place_project\":\"{}\"", app_socket::json_escape(project)));
+    }
 }
 
 fn waiting(extra: &mut String, wait: &Wait, client_timeout: &mut u64) {
@@ -941,10 +962,13 @@ fn notify(channel: &Channel, args: NotifyArgs) -> Result<()> {
         fail("termio: notify needs a message (e.g. `termio notify \"tests passed\"`)");
     }
     app_socket::require_socket(channel);
-    let extra = match &args.title {
-        Some(title) => format!("\"title\":\"{}\"", app_socket::json_escape(title)),
-        None => String::new(),
-    };
+    let mut extra = String::new();
+    if let Some(title) = &args.title {
+        push(&mut extra, &format!("\"title\":\"{}\"", app_socket::json_escape(title)));
+    }
+    if let Some(about) = &args.session {
+        push(&mut extra, &format!("\"about\":\"{}\"", app_socket::json_escape(about)));
+    }
     exit_outcome(app_socket::request_once(
         channel,
         app_socket::client_timeout(),
@@ -998,7 +1022,8 @@ Post a macOS notification from the running app. The agent uses this to ping you
 directly — \"build finished\", \"need a decision\" — regardless of whether termio is
 frontmost (unlike the automatic completion banner). --title overrides the default
 (the calling agent's name); the banner's subtitle is the project, and clicking it
-focuses the session that posted it.";
+focuses the session that posted it — or, with --session, the session the notice
+is about.";
 
 const LIST_HELP: &str = "\
 List the sessions in this project with their live status (working / idle /
@@ -1037,6 +1062,11 @@ the automatic stack; --ratio is the new pane's share of the split (e.g. 0.25
 for a short strip) and holds against later spawns. Panes without a stated
 ratio share their run evenly.
 
+--cwd and --project start the session somewhere else, as a tab of its own that
+takes no focus: a folder on this Mac, `machine:path` on another machine
+Termio knows (`devbox:~/src/api`), or a project by name or path. Only the
+Chief of Staff may name a place; any other caller stays in its own project.
+
 Readiness is judged from the screen, so an agent sitting on a startup gate —
 a trust prompt, a usage notice, a first-run dialog — looks ready while it is
 actually waiting for a keypress, and swallows the prompt as its answer. The
@@ -1067,6 +1097,9 @@ transcript; its screen is the result), close it with `close`.
 --direction places the pane relative to yours (right or down); --ratio is its
 share of the split — `--direction down --ratio 0.25` is a log strip under
 your pane, not a column beside it.
+
+--cwd [machine:]path and --project <p> start it somewhere else instead, as a
+tab of its own (Chief of Staff only).
 
 --wait settles when the screen goes still after the command's output (or
 returns needs-you / times out, exactly as with send).

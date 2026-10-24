@@ -440,6 +440,12 @@ enum SessionStatus: Hashable {
     case needsAttention
 }
 
+/// What a session is for beyond being a terminal. One case today; the wire
+/// spelling is the raw value, shared with the daemon and the phone.
+enum SessionRole: String, Codable, Hashable {
+    case chief
+}
+
 /// A single terminal session within a project. Each session owns one live
 /// libghostty terminal surface (see `TermioStore.surface(for:in:)`).
 struct Session: Identifiable, Hashable, Codable {
@@ -527,6 +533,14 @@ struct Session: Identifiable, Hashable, Codable {
     /// set. Persisted. The session still shows in its normal tree spot (the pin adds a
     /// shortcut up top, it doesn't move the row).
     var pinned = false
+
+    /// What this session is for beyond being a terminal. `.chief` marks the one
+    /// session Termio runs as the Chief of Staff
+    /// (docs/design/20261019-chief-of-staff.md): the only caller `termio
+    /// sessions` grants fleet scope, and the row the sidebar draws above the tree.
+    /// `nil` for every other session. Sent to the daemon at creation too, so the
+    /// device's roster shows it to apps on other machines.
+    var role: SessionRole?
 
     /// When set, this session is an **SSH terminal** — instead of a local login
     /// shell it launches `ssh <host>` in the PTY, dropping the user straight onto a
@@ -636,6 +650,10 @@ struct Session: Identifiable, Hashable, Codable {
     /// it was given.
     var spawnDirectory: String?
 
+    /// The Chief's instructions belong to its launch, so an offline settings
+    /// change must not reattach a process still reading the previous folder.
+    var chiefDataDirectory: String?
+
     /// The last meaningful terminal title (`OSC 0/2`) the session's agent reported,
     /// e.g. Claude Code's conversation topic. Persisted so the sidebar keeps the
     /// adopted label across app restarts — the agent only re-emits a title once it
@@ -666,7 +684,8 @@ struct Session: Identifiable, Hashable, Codable {
         case id, title, agent, createdAt, worktreePath, resumeID, launched, launchedAt,
              liveTitle, promptTitle, lastWorkingDirectory, spawnDirectory, sshHost, pinned,
              termiodRemoteHost, termiodRemoteCwd, deviceID, termiodSessionName,
-             termiodDaemonID, givenTitle, pendingName, daemonNameInitialized, customNameRevision
+             termiodDaemonID, givenTitle, pendingName, daemonNameInitialized, customNameRevision,
+             role, chiefDataDirectory
     }
 
     /// The name to recover from a state file written before `givenTitle` existed,
@@ -705,11 +724,16 @@ struct Session: Identifiable, Hashable, Codable {
         resumeID = try container.decodeIfPresent(String.self, forKey: .resumeID)
         launched = try container.decodeIfPresent(Bool.self, forKey: .launched) ?? false
         pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        // Read as a string so a role a newer build wrote degrades to no role
+        // instead of failing the whole state file.
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+            .flatMap(SessionRole.init(rawValue:))
         launchedAt = try container.decodeIfPresent(Date.self, forKey: .launchedAt)
         liveTitle = try container.decodeIfPresent(String.self, forKey: .liveTitle)
         promptTitle = try container.decodeIfPresent(String.self, forKey: .promptTitle)
         lastWorkingDirectory = try container.decodeIfPresent(String.self, forKey: .lastWorkingDirectory)
         spawnDirectory = try container.decodeIfPresent(String.self, forKey: .spawnDirectory)
+        chiefDataDirectory = try container.decodeIfPresent(String.self, forKey: .chiefDataDirectory)
         sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost)
         termiodRemoteHost = try container.decodeIfPresent(String.self, forKey: .termiodRemoteHost)
         termiodRemoteCwd = try container.decodeIfPresent(String.self, forKey: .termiodRemoteCwd)

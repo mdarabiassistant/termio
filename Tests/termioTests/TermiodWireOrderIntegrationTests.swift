@@ -165,7 +165,9 @@ final class TermiodWireOrderIntegrationTests: XCTestCase {
             startScratchTerminal: { _ in nil }, startSSHSession: { _, _ in nil },
             renameSession: { id, name, completion in
                 store.companionRenameSession(sessionID: id, name: name, completion: completion)
-            })
+            },
+            sendToChief: { id, text in await store.companionSendToChief(sessionID: id, text: text) },
+            latestChiefNotice: { store.chiefOfStaffWireNotice })
         server.start()
         defer { server.stop() }
         for _ in 0..<200 where (server.listeningPort ?? 0) == 0 { try await Task.sleep(for: .milliseconds(5)) }

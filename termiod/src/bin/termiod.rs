@@ -529,6 +529,7 @@ async fn main() -> Result<()> {
             let spec = CreateSpec {
                 name,
                 custom_name: None,
+                role: None,
                 cwd,
                 argv,
                 command: None,
@@ -680,6 +681,7 @@ async fn main() -> Result<()> {
                 mine_field(payload.as_ref()?, field)
             };
             let details = protocol::StatusDetails {
+                agent_processes: termiod::proc::hook_agent_processes(),
                 transcript_path: transcript
                     .then(|| payload.as_ref().and_then(|p| mine_field(p, "transcript_path")))
                     .flatten(),
@@ -732,6 +734,7 @@ async fn main() -> Result<()> {
                 Some(CreateSpec {
                     name: Some(target.clone()),
                     custom_name: None,
+                    role: None,
                     cwd,
                     argv,
                     command: None,

@@ -248,6 +248,13 @@ struct CommandPaletteView: View {
     private var availableActions: [PaletteAction] {
         var actions: [PaletteAction] = []
         let keys = KeybindingStore.shared
+        if store.chiefOfStaffID != nil {
+            actions.append(.init(id: "chief-of-staff", title: KeyCommandCatalog.info(.chiefOfStaff).title,
+                                 icon: nil, symbol: "person.crop.circle.badge.checkmark",
+                                 shortcut: keys.display(for: .chiefOfStaff)) {
+                $0.revealChiefOfStaff()
+            })
+        }
         if store.selectedSessionID != nil {
             actions.append(.init(id: "split-right", title: localized("Split Right"),
                                  icon: .layoutColumns, shortcut: keys.display(for: .splitRight)) {

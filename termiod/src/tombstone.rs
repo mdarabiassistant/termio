@@ -480,7 +480,7 @@ impl Graveyard {
     }
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;
     // A corrupt record is dropped rather than fatal: a daemon that will not
     // start because it cannot parse its own history is a worse outcome than a
@@ -491,7 +491,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 /// Written atomically via a temp file and rename, so a daemon killed mid-write
 /// leaves the previous record intact rather than a truncated one — a file that
 /// only matters when something died badly must survive dying badly.
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = serde_json::to_vec_pretty(value)?;
     let temporary = path.with_extension("tmp");
     std::fs::write(&temporary, &text)
@@ -518,11 +518,14 @@ mod tests {
             created_unix: 1000,
             alive: true,
             status: "working".to_string(),
+            agent_ready: Some(false),
+            status_blocking: Some(false),
             agent_id: Some("claude".to_string()),
             project: Some("/work".to_string()),
             title: Some("fixing the parser".to_string()),
             custom_name: None,
             custom_name_revision: 0,
+            role: None,
             attached_clients: 0,
             writer_client_id: None,
             foreground_pid: None,

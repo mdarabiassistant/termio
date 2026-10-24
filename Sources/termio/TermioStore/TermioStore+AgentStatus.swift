@@ -75,6 +75,11 @@ extension TermioStore {
     /// `AgentIntegrationInstaller`) and the previous state is left alone. The
     /// place that *does* report is Settings, where the user asked.
     func syncAgentIntegration() {
+        // Tests build stores by the dozen with both switches off, and the daemon
+        // they would ask is whichever one answers this user's socket — the
+        // installed app's, once an integration test unsets `TERMIOD_SOCK`. The
+        // files it would rewrite are this user's real agent config.
+        guard !AppChannel.isRunningTests else { return }
         let hooks: Termiod.AgentHalfAction =
             settings.agentHooksEnabled ? .install : .remove
         let skills: Termiod.AgentHalfAction =
@@ -147,6 +152,10 @@ extension TermioStore {
         lastHookReportAt[id] = nil
         agentExitStreaks[id] = nil
         blockingAttention.remove(id)
+        launchPrompts[id] = nil
+        launchesAwaitingStart.removeValue(forKey: id)
+        heldAtStartup.remove(id)
+        parkedExits[id] = nil
     }
 
     /// Light the "blocked on you" dot from a genuine, observable blocking condition
@@ -159,8 +168,11 @@ extension TermioStore {
     /// showing gets *upgraded* to blocking when the real signal arrives.
     func flagBlockingAttention(for id: Session.ID) {
         guard !isViewing(id) else { return }
+        let upgradesABell = status(for: id) == .needsAttention && !blockingAttention.contains(id)
         blockingAttention.insert(id)
         setStatus(.needsAttention, for: id)
+        // The status write above is a no-op then, so the feed hears it here.
+        if upgradesABell { noteBlockingUpgradeForChiefOfStaff(id) }
     }
 
     /// Reclassifies a shell-backed session to whatever agent runs in its foreground —

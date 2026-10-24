@@ -9,6 +9,99 @@ import TermioShared
 /// calm cue, which demands attention, and which is not the host's to make.
 @MainActor
 final class TermiodStatusTests: XCTestCase {
+    private func deviceChange(_ state: String, seq: Int, session: String = "test-daemon") throws -> Termiod.StatusChangedPayload {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "ev": "status_changed", "resource": "status:", "seq": seq,
+            "session": session, "status": state, "source": "hook", "blocking": true,
+        ])
+        guard case .statusChanged(let change) = try Termiod.decodeEvent(data) else {
+            throw NSError(domain: "fixture", code: 1)
+        }
+        return change
+    }
+
+    func testDeviceStatusUpdatesUnopenedRowsWithoutGrantingReadiness() throws {
+        var row = Session(title: "Chief", agent: .claudeCode)
+        row.role = .chief
+        row.termiodDaemonID = "test-daemon"
+        let store = makeStore(with: row)
+        let watch = DeviceStatusWatch(device: .thisMac)
+        store.receiveDeviceStatus(try deviceChange("needs_you", seq: 1), from: .thisMac, watch: watch)
+        XCTAssertEqual(store.status(for: row.id), .needsAttention)
+        XCTAssertTrue(store.blockingAttention.contains(row.id))
+        XCTAssertFalse(store.chiefOfStaff.agentReady, "a replayed hook is not readiness proof")
+        store.receiveDeviceStatus(try deviceChange("done", seq: 2), from: .thisMac, watch: watch)
+        store.receiveDeviceStatus(try deviceChange("working", seq: 1), from: .thisMac, watch: watch)
+        XCTAssertEqual(store.status(for: row.id), .done)
+        XCTAssertTrue(store.termiodLinks.isEmpty)
+        XCTAssertTrue(store.surfaces.isEmpty)
+    }
+
+    func testDeviceStatusIsScopedToItsMachine() throws {
+        var row = Session(title: "Local", agent: .claudeCode)
+        row.termiodDaemonID = "test-daemon"
+        let store = makeStore(with: row)
+        let device = KnownDevice(alias: "test-machine", deviceID: nil)
+        let watch = DeviceStatusWatch(device: device)
+        XCTAssertFalse(store.deliverDeviceStatus(try deviceChange("done", seq: 1), from: device, watch: watch))
+        XCTAssertEqual(store.status(for: row.id), .idle)
+        XCTAssertTrue(store.termiodLinks.isEmpty)
+    }
+
+    func testSnapshotCannotOverwriteAStatusReceivedDuringItsRequest() throws {
+        var row = Session(title: "Agent", agent: .claudeCode)
+        row.termiodDaemonID = "test-daemon"
+        let store = makeStore(with: row)
+        let watch = DeviceStatusWatch(device: .thisMac)
+        watch.requireSnapshot()
+        let generation = try XCTUnwrap(watch.snapshotGeneration)
+        let revision = watch.revision
+        store.receiveDeviceStatus(try deviceChange("done", seq: 2), from: .thisMac, watch: watch)
+        let json = Data(#"{"ev":"sessions","sessions":[{"id":"test-daemon","name":"test","status":"working","alive":true}]}"#.utf8)
+        let payload = try JSONDecoder().decode(Termiod.SessionsPayload.self, from: json)
+        store.applyDeviceStatusSnapshot(payload.sessions, from: .thisMac, watch: watch,
+            generation: generation, revision: revision)
+        XCTAssertEqual(store.status(for: row.id), .done)
+        XCTAssertNil(watch.snapshotGeneration)
+        XCTAssertTrue(store.surfaces.isEmpty)
+    }
+
+    func testSnapshotPreservesANewerAttachedReportDuringReconnect() throws {
+        var row = Session(title: "Agent", agent: .claudeCode)
+        row.termiodDaemonID = "test-daemon"
+        let store = makeStore(with: row)
+        let watch = DeviceStatusWatch(device: .thisMac)
+        store.deviceStatusWatches[store.deviceStatusKey(for: .thisMac)] = watch
+        watch.requireSnapshot()
+        let generation = try XCTUnwrap(watch.snapshotGeneration)
+        let revision = watch.revision
+        XCTAssertTrue(store.attachedStatusShouldApply(for: row))
+        store.applyTermiodStatus(status("done"), for: row.id)
+        let payload = try JSONDecoder().decode(Termiod.SessionsPayload.self, from:
+            Data(#"{"ev":"sessions","sessions":[{"id":"test-daemon","name":"test","status":"working","alive":true}]}"#.utf8))
+        store.applyDeviceStatusSnapshot(payload.sessions, from: .thisMac, watch: watch,
+            generation: generation, revision: revision)
+        XCTAssertEqual(store.status(for: row.id), .done)
+    }
+
+    func testSnapshotRepairsStatusAndBlockingWithoutInventingAStartupHook() throws {
+        var row = Session(title: "Chief", agent: .claudeCode)
+        row.role = .chief
+        row.termiodDaemonID = "test-daemon"
+        let store = makeStore(with: row)
+        let watch = DeviceStatusWatch(device: .thisMac)
+        watch.requireSnapshot()
+        let generation = try XCTUnwrap(watch.snapshotGeneration)
+        let payload = try JSONDecoder().decode(Termiod.SessionsPayload.self, from:
+            Data(#"{"ev":"sessions","sessions":[{"id":"test-daemon","name":"test","status":"needs_you","statusBlocking":true,"alive":true}]}"#.utf8))
+        store.applyDeviceStatusSnapshot(payload.sessions, from: .thisMac, watch: watch,
+            generation: generation, revision: watch.revision)
+        XCTAssertEqual(store.status(for: row.id), .needsAttention)
+        XCTAssertTrue(store.blockingAttention.contains(row.id))
+        XCTAssertFalse(store.chiefOfStaff.agentReady)
+        XCTAssertTrue(store.surfaces.isEmpty)
+    }
+
     override func setUp() {
         super.setUp()
         // The attention arms ask whether the user is looking, which reads
@@ -580,5 +673,135 @@ final class TermiodStatusTests: XCTestCase {
 
         XCTAssertTrue(store.termiodTombstones.isEmpty)
         XCTAssertNil(store.termiodEndReason(for: session))
+    }
+
+    // MARK: - An agent launched with its prompt
+
+    private func report(_ state: String, from source: String, turnEnded: Bool = false)
+        -> Termiod.StatusPayload {
+        Termiod.StatusPayload(
+            session: "s_1", status: state, title: nil, source: source, turnEnded: turnEnded)
+    }
+
+    /// A store with `session` held at its startup question: watched past its
+    /// deadline and marked as waiting on you, the way `watchLaunchedPrompt` leaves it.
+    private func makeStoreHoldingStartup(_ session: Session) -> TermioStore {
+        let store = makeStore(with: session)
+        store.heldAtStartup.insert(session.id)
+        store.flagBlockingAttention(for: session.id)
+        return store
+    }
+
+    /// A resize repaints a held trust prompt, the device reads two changed frames
+    /// as a turn, and its sweep ends the guess twelve seconds later. Neither is
+    /// the agent speaking, so neither moves the mark.
+    func testTheScreensGuessesLeaveAHeldStartupQuestionStanding() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStoreHoldingStartup(session)
+
+        store.applyTermiodStatus(report("working", from: "streak"), for: session.id)
+        XCTAssertEqual(store.status(for: session.id), .needsAttention)
+
+        store.applyTermiodStatus(report("idle", from: "streak", turnEnded: true), for: session.id)
+        XCTAssertEqual(store.status(for: session.id), .needsAttention)
+        XCTAssertTrue(store.heldAtStartup.contains(session.id))
+    }
+
+    /// The retest lost a held question to a reset nothing in the evidence named.
+    /// So the mark no longer depends on finding every writer: nothing but an
+    /// answer, a start or an end lifts it, and a look doesn't either.
+    func testOnlyAnAnswerAStartOrAnEndLiftsTheMark() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStoreHoldingStartup(session)
+
+        XCTAssertFalse(store.setStatus(.idle, for: session.id))
+        store.markSeen(session.id)
+
+        XCTAssertEqual(store.status(for: session.id), .needsAttention)
+    }
+
+    /// Before the watch decides, a streak is still a boot repaint and not a turn,
+    /// so the row doesn't spin for an agent that hasn't started.
+    func testAStartingAgentDoesNotSpinOnARepaint() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStore(with: session)
+        store.launchesAwaitingStart[session.id] = Date().addingTimeInterval(20)
+
+        store.applyTermiodStatus(report("working", from: "streak"), for: session.id)
+
+        XCTAssertEqual(store.status(for: session.id), .idle)
+        XCTAssertTrue(store.isStartingUp(session.id))
+    }
+
+    /// A question is never a guess about activity, so it gets through.
+    func testAStartingAgentsQuestionStillReachesYou() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStore(with: session)
+        store.launchesAwaitingStart[session.id] = Date().addingTimeInterval(20)
+
+        store.applyTermiodStatus(report("needs_you", from: "screen"), for: session.id)
+
+        XCTAssertEqual(store.status(for: session.id), .needsAttention)
+    }
+
+    /// The agent's own word ends the startup: a hook, or its working title.
+    func testTheAgentsOwnWordMeansItStarted() {
+        let hooked = Session(title: "agent", agent: .claudeCode)
+        let store = makeStoreHoldingStartup(hooked)
+
+        store.applyTermiodStatus(report("working", from: "hook"), for: hooked.id)
+
+        XCTAssertEqual(store.status(for: hooked.id), .working)
+        XCTAssertFalse(store.isStartingUp(hooked.id))
+
+        let titled = Session(title: "agent", agent: .codex)
+        let other = makeStore(with: titled)
+        other.launchesAwaitingStart[titled.id] = Date().addingTimeInterval(20)
+
+        other.applyTermiodStatus(report("working", from: "title"), for: titled.id)
+
+        XCTAssertEqual(other.status(for: titled.id), .working)
+        XCTAssertFalse(other.isStartingUp(titled.id))
+    }
+
+    /// Answering the question clears the mark — nothing else would until the
+    /// agent reports — and watches again in case it asks something else first.
+    func testAnAnswerClearsTheMarkAndWatchesAgain() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStoreHoldingStartup(session)
+
+        store.noteInputBeforeStart(session.id)
+
+        XCTAssertEqual(store.status(for: session.id), .idle)
+        XCTAssertFalse(store.heldAtStartup.contains(session.id))
+        XCTAssertNotNil(store.launchesAwaitingStart[session.id])
+    }
+
+    /// Typing into an agent that is still starting is an answer in progress, so
+    /// its deadline starts over rather than flashing amber a moment later.
+    func testInputBeforeTheDeadlineStartsTheWindowOver() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStore(with: session)
+        store.launchesAwaitingStart[session.id] = Date().addingTimeInterval(1)
+
+        store.noteInputBeforeStart(session.id)
+
+        let deadline = store.launchesAwaitingStart[session.id] ?? .distantPast
+        XCTAssertGreaterThan(deadline.timeIntervalSinceNow, TermioStore.launchStartWindow - 2)
+        XCTAssertEqual(store.status(for: session.id), .idle)
+    }
+
+    /// Told "No, exit", the agent's process ends; an ended row asks nothing.
+    func testAProcessThatEndsTakesItsStartupQuestionWithIt() {
+        let session = Session(title: "agent", agent: .claudeCode)
+        let store = makeStoreHoldingStartup(session)
+
+        store.applyTermiodExit(
+            for: session.id, code: 1, runtimeMilliseconds: 30_000, information: nil,
+            isAgentSession: true, isPlainTerminal: false, surface: nil)
+
+        XCTAssertEqual(store.status(for: session.id), .idle)
+        XCTAssertFalse(store.isStartingUp(session.id))
+        XCTAssertEqual(store.parkedExits[session.id], 1)
     }
 }

@@ -285,6 +285,11 @@ pub struct AgentManifest {
     pub command: Option<String>,
     #[serde(default, rename = "permissionBypassFlag")]
     pub permission_bypass_flag: Option<String>,
+    /// How the agent takes a first prompt on its command line. Only the app
+    /// composes launch commands, so nothing here reads it; it is declared so a
+    /// value of the wrong type fails to parse on both sides.
+    #[serde(default, rename = "promptArgument")]
+    pub prompt_argument: Option<String>,
     #[serde(default)]
     pub resume: Option<ResumeConfig>,
     #[serde(default)]

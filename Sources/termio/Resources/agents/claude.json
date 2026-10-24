@@ -5,6 +5,7 @@
   "wire": "claude",
   "command": "claude",
   "permissionBypassFlag": "--dangerously-skip-permissions",
+  "promptArgument": "-- {prompt}",
   "resume": {
     "create": "--session-id {id}",
     "resume": "--resume {id}",
@@ -25,7 +26,7 @@
     "capturesTranscript": true,
     "tool": "tool_name",
     "events": [
-      { "on": "SessionStart", "state": "idle", "matcher": "clear" },
+      { "on": "SessionStart", "state": "idle", "matcher": "startup|resume|clear" },
       { "on": "UserPromptSubmit", "state": "working" },
       { "on": "PreToolUse", "state": "working", "matcher": "*" },
       { "on": "PostToolUse", "state": "working", "matcher": "*" },

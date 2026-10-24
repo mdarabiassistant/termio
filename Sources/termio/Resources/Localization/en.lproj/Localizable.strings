@@ -238,6 +238,8 @@
 	<string>Blur: %lld</string>
 	<key>Branch</key>
 	<string>Branch</string>
+	<key>Brief me when sessions need me</key>
+	<string>Brief me when sessions need me</string>
 	<key>Bring All to Front</key>
 	<string>Bring All to Front</string>
 	<key>Built-in</key>
@@ -292,6 +294,8 @@
 	<string>Checking the machine…</string>
 	<key>Checking…</key>
 	<string>Checking…</string>
+	<key>Chief of Staff</key>
+	<string>Chief of Staff</string>
 	<key>Choose a different name.</key>
 	<string>Choose a different name.</string>
 	<key>Choose a name for this workspace.</key>
@@ -300,6 +304,10 @@
 	<string>Choose a project folder on %@.</string>
 	<key>Choose a project folder to open in Termio.</key>
 	<string>Choose a project folder to open in Termio.</string>
+	<key>Choose a working folder you can read.</key>
+	<string>Choose a working folder you can read.</string>
+	<key>Choose an existing working folder.</key>
+	<string>Choose an existing working folder.</string>
 	<key>Choose another branch to compare with.</key>
 	<string>Choose another branch to compare with.</string>
 	<key>Choose how projects are ordered</key>
@@ -440,6 +448,8 @@
 	<string>Couldn’t load</string>
 	<key>Couldn’t open a pull request page</key>
 	<string>Couldn’t open a pull request page</string>
+	<key>Couldn’t open the instructions file.</key>
+	<string>Couldn’t open the instructions file.</string>
 	<key>Couldn’t remove %@.</key>
 	<string>Couldn’t remove %@.</string>
 	<key>Couldn’t remove worktree</key>
@@ -474,6 +484,8 @@
 	<string>Cut</string>
 	<key>Dark</key>
 	<string>Dark</string>
+	<key>Data Folder</key>
+	<string>Data Folder</string>
 	<key>Decrease Font Size</key>
 	<string>Decrease Font Size</string>
 	<key>Default Dark Theme</key>
@@ -542,6 +554,8 @@
 	<string>Duplicate to Themes Folder</string>
 	<key>Edit</key>
 	<string>Edit</string>
+	<key>Edit Instructions…</key>
+	<string>Edit Instructions…</string>
 	<key>Edit Manifest</key>
 	<string>Edit Manifest</string>
 	<key>Edit in Config</key>
@@ -568,6 +582,8 @@
 	<string>Every iPhone paired with %@ is signed out and must re-scan the new QR to reconnect.</string>
 	<key>Every paired iPhone is signed out and must re-scan the new QR to reconnect.</key>
 	<string>Every paired iPhone is signed out and must re-scan the new QR to reconnect.</string>
+	<key>Existing files stay in their current folder.</key>
+	<string>Existing files stay in their current folder.</string>
 	<key>Exited with status %lld.</key>
 	<string>Exited with status %lld.</string>
 	<key>Expand Results</key>
@@ -668,6 +684,8 @@
 	<string>How much output each session keeps for scrolling back. Agents are verbose, so the default is generous.</string>
 	<key>Icon</key>
 	<string>Icon</string>
+	<key>If that machine is gone for good, turn it on here instead.</key>
+	<string>If that machine is gone for good, turn it on here instead.</string>
 	<key>Ignore %lld Selected Files (Add to .gitignore)</key>
 	<string>Ignore %lld Selected Files (Add to .gitignore)</string>
 	<key>Ignore All .%@ Files (Add to .gitignore)</key>
@@ -986,6 +1004,8 @@
 	<string>On iPhone, tap the Mac pill ▸ Scan QR Code. The tunnel address works from any network, and terminates on the provider's servers. Pick Custom to run your own relay instead.</string>
 	<key>On iPhone, tap the Mac pill ▸ Scan QR Code. Traffic crosses the relay you run yourself — no third party in the path.</key>
 	<string>On iPhone, tap the Mac pill ▸ Scan QR Code. Traffic crosses the relay you run yourself — no third party in the path.</string>
+	<key>One machine at a time: turning it on is refused while another machine Termio can reach has it on.</key>
+	<string>One machine at a time: turning it on is refused while another machine Termio can reach has it on.</string>
 	<key>Only regular files can be previewed.</key>
 	<string>Only regular files can be previewed.</string>
 	<key>Only the first %lld items are shown — update termio on this device to list them all.</key>
@@ -1126,6 +1146,8 @@
 	<string>Purple</string>
 	<key>Push the current branch to the repository’s remote first, then try again. (The remote also needs to be a forge Termio recognizes: GitHub, GitLab, Bitbucket, or Gitea.)</key>
 	<string>Push the current branch to the repository’s remote first, then try again. (The remote also needs to be a forge Termio recognizes: GitHub, GitLab, Bitbucket, or Gitea.)</string>
+	<key>Questions, finished turns, and stalls from every session go to the Chief of Staff, which decides what to tell you.</key>
+	<string>Questions, finished turns, and stalls from every session go to the Chief of Staff, which decides what to tell you.</string>
 	<key>Quit Termio</key>
 	<string>Quit Termio</string>
 	<key>Range</key>
@@ -1248,14 +1270,20 @@
 	<string>Runs on that machine with your login’s privileges — no shell, arguments split on spaces. Use {port} for the daemon’s port.</string>
 	<key>Runs on this Mac with your privileges when Custom is selected — no shell, arguments split on spaces. Use {port} for the companion port; the URL pattern is a regex matching the public https URL your relay prints.</key>
 	<string>Runs on this Mac with your privileges when Custom is selected — no shell, arguments split on spaces. Use {port} for the companion port; the URL pattern is a regex matching the public https URL your relay prints.</string>
+	<key>Runs one agent that can see and drive every session on your machines. Talk to it in its pane at the top of the sidebar, or from your phone.</key>
+	<string>Runs one agent that can see and drive every session on your machines. Talk to it in its pane at the top of the sidebar, or from your phone.</string>
 	<key>Runs with `%@`. The agent won’t ask before editing files or running commands.</key>
 	<string>Runs with `%@`. The agent won’t ask before editing files or running commands.</string>
 	<key>SF Symbol name</key>
 	<string>SF Symbol name</string>
 	<key>Save</key>
 	<string>Save</string>
+	<key>Save Folders</key>
+	<string>Save Folders</string>
 	<key>Save Highlights into PDF</key>
 	<string>Save Highlights into PDF</string>
+	<key>Save and Restart</key>
+	<string>Save and Restart</string>
 	<key>Save failed: %@</key>
 	<string>Save failed: %@</string>
 	<key>Saving to %@…</key>
@@ -1294,6 +1322,8 @@
 	<string>Selection</string>
 	<key>Sends one anonymous event a day so the project can count active installs. No project paths, no terminal contents, no account.</key>
 	<string>Sends one anonymous event a day so the project can count active installs. No project paths, no terminal contents, no account.</string>
+	<key>Separate working and data folders require Claude Code or Codex.</key>
+	<string>Separate working and data folders require Claude Code or Codex.</string>
 	<key>Server</key>
 	<string>Server</string>
 	<key>Serving</key>
@@ -1392,10 +1422,14 @@
 	<string>Starting tunnel…</string>
 	<key>Starting…</key>
 	<string>Starting…</string>
+	<key>Starts the Chief of Staff here so it can read your projects.</key>
+	<string>Starts the Chief of Staff here so it can read your projects.</string>
 	<key>State</key>
 	<string>State</string>
 	<key>Status</key>
 	<string>Status</string>
+	<key>Stores its instructions, notes, and intermediate files.</key>
+	<string>Stores its instructions, notes, and intermediate files.</string>
 	<key>Style</key>
 	<string>Style</string>
 	<key>Switch between project files, search, changes, and info</key>
@@ -1446,6 +1480,10 @@
 	<string>Test</string>
 	<key>Test Connection</key>
 	<string>Test Connection</string>
+	<key>The Chief of Staff is on %@.</key>
+	<string>The Chief of Staff is on %@.</string>
+	<key>The Chief of Staff replied. Open it to read.</key>
+	<string>The Chief of Staff replied. Open it to read.</string>
 	<key>The agent New Chat (⌘N) starts. “Last used” follows whichever agent you most recently chatted with.</key>
 	<string>The agent New Chat (⌘N) starts. “Last used” follows whichever agent you most recently chatted with.</string>
 	<key>The base branch has commits this branch doesn’t have, as of the last fetch.</key>
@@ -1454,6 +1492,8 @@
 	<string>The clone runs on %@ and opens as a project there.</string>
 	<key>The coding agents offered when you start a session</key>
 	<string>The coding agents offered when you start a session</string>
+	<key>The data folder’s Claude settings are not valid JSON.</key>
+	<string>The data folder’s Claude settings are not valid JSON.</string>
 	<key>The device couldn’t read this checkout.</key>
 	<string>The device couldn’t read this checkout.</string>
 	<key>The device couldn’t read this comparison.</key>
@@ -1608,6 +1648,8 @@
 	<string>Try another search term.</string>
 	<key>Tunnel</key>
 	<string>Tunnel</string>
+	<key>Turn On Here Instead</key>
+	<string>Turn On Here Instead</string>
 	<key>Turn off to disconnect your iPhone; pairing is kept.</key>
 	<string>Turn off to disconnect your iPhone; pairing is kept.</string>
 	<key>Turned off in Settings ▸ Agents, so Termio removes it from %@.</key>
@@ -1646,6 +1688,8 @@
 	<string>Use Regular Expression</string>
 	<key>Use Selection for Find</key>
 	<string>Use Selection for Find</string>
+	<key>Use an absolute folder path or a path starting with ~/.</key>
+	<string>Use an absolute folder path or a path starting with ~/.</string>
 	<key>Used for this invite only. To make it stick, start the daemon there with --wss-origin.</key>
 	<string>Used for this invite only. To make it stick, start the daemon there with --wss-origin.</string>
 	<key>User</key>
@@ -1696,6 +1740,8 @@
 	<string>Window</string>
 	<key>Working Directory</key>
 	<string>Working Directory</string>
+	<key>Working Folder</key>
+	<string>Working Folder</string>
 	<key>Workspace</key>
 	<string>Workspace</string>
 	<key>Workspace Settings…</key>

@@ -3,8 +3,8 @@ title: 自定义 Agent
 description: 往 ~/.termio/config/agents 里放一个小小的 JSON 清单，就能让 Termio 认识任何命令行工具——给它名字、图标和实时状态识别，它就和内置 Agent 一样是一等公民。
 x-i18n:
   source_path: custom-agents.mdx
-  source_hash: c740d7d136f49ebb07cfb3a5b95d98e036e5b56767e7e3e8252d1b97c593dca7
-  generated_at: 2026-09-19
+  source_hash: 6fa67dde10e0b810c456d2e3c64564a5530c709eb2b1ac4fa6f1fbad879e1ac5
+  generated_at: 2026-10-20
 ---
 
 Termio 内置了常见的编程 Agent，但这个目录是开放的：任何命令行工具都能成为一等 Agent。
@@ -65,6 +65,7 @@ Termio 在启动时读取这个文件夹，之后每当你在 Agent 设置打开
 | `status` | | 用于实时状态的屏幕匹配规则——见下文。 |
 | `resume` | | 重新打开的会话如何续上原来那段对话——一个由启动参数模板和会话存储描述组成的对象。参见 [Agent 终端协议](/zh-CN/docs/atp#resume)。省略则每次启动都是全新的。 |
 | `permissionBypassFlag` | | 当你为该 Agent 打开「跳过权限确认」时追加的参数。 |
+| `promptArgument` | | Agent 在命令行上接收首条提示的方式，`{prompt}` 标出文本的位置（例如 `"-- {prompt}"`）。带提示启动的会话会这样传入它，这样 Agent 启动时提出的问题不会被输入的按键误答。省略则 Termio 会在 Agent 的画面稳定后把提示输入进去。 |
 | `tint` | | 一个十六进制颜色（例如 `"#14B8A6"`），用于给「工作中」指示器上色。 |
 
 ### 图标

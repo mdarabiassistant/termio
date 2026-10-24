@@ -94,6 +94,8 @@ final class AppSettings: ObservableObject {
         Key.bypassPermissionAgents, Key.agentArguments, Key.disabledAgents,
         Key.addedAgents, Key.agentOrder, Key.agentHooksEnabled,
         Key.sessionControlEnabled, Key.githubIntegrationEnabled,
+        Key.chiefOfStaffEnabled, Key.chiefOfStaffAgent, Key.chiefOfStaffBriefs,
+        Key.chiefOfStaffWorkingDirectory, Key.chiefOfStaffDataDirectory,
         Key.notifyTaskCompletion, Key.notificationSound,
         Key.analyticsEnabled,
         Key.projectSortOrder, Key.defaultChatAgent, Key.dimIgnoredFiles,
@@ -143,6 +145,11 @@ final class AppSettings: ObservableObject {
         static let agentHooksEnabled = "agents.hooksEnabled"
         static let sessionControlEnabled = "agents.sessionControlEnabled"
         static let sessionControlPrompted = "agents.sessionControlPrompted"
+        static let chiefOfStaffEnabled = "chiefOfStaff.enabled"
+        static let chiefOfStaffAgent = "chiefOfStaff.agent"
+        static let chiefOfStaffBriefs = "chiefOfStaff.briefs"
+        static let chiefOfStaffWorkingDirectory = "chiefOfStaff.workingDirectory"
+        static let chiefOfStaffDataDirectory = "chiefOfStaff.dataDirectory"
         static let usageAuthorizedAgents = "usage.authorizedAgents"
         static let claudeKeychainDeclined = "usage.claudeKeychainDeclined"
         static let githubIntegrationEnabled = "github.integrationEnabled"
@@ -453,6 +460,37 @@ final class AppSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Key.sessionControlPrompted) }
     }
 
+    // MARK: Chief of Staff
+
+    /// Whether this machine runs the Chief of Staff: one agent session that can
+    /// see and drive every session the app is connected to
+    /// (docs/design/20261019-chief-of-staff.md). At most one machine at a time —
+    /// `TermioStore` refuses to turn it on while another machine it can reach
+    /// holds the claim, and turns this back off when that happens.
+    @Published var chiefOfStaffEnabled: Bool {
+        didSet { store.set(chiefOfStaffEnabled, forKey: Key.chiefOfStaffEnabled) }
+    }
+
+    /// Which agent the Chief of Staff runs, by id. `nil` means Claude Code, or
+    /// the first enabled agent when Claude Code is off.
+    @Published var chiefOfStaffAgentID: String? {
+        didSet { store.set(chiefOfStaffAgentID, forKey: Key.chiefOfStaffAgent) }
+    }
+
+    /// Whether Termio types session events into the Chief of Staff — every
+    /// session's needs-you, done, and stall — so it can decide what to tell you.
+    @Published var chiefOfStaffBriefsEnabled: Bool {
+        didSet { store.set(chiefOfStaffBriefsEnabled, forKey: Key.chiefOfStaffBriefs) }
+    }
+
+    @Published var chiefOfStaffWorkingDirectory: String {
+        didSet { store.set(chiefOfStaffWorkingDirectory, forKey: Key.chiefOfStaffWorkingDirectory) }
+    }
+
+    @Published var chiefOfStaffDataDirectory: String {
+        didSet { store.set(chiefOfStaffDataDirectory, forKey: Key.chiefOfStaffDataDirectory) }
+    }
+
     /// Gates the GitHub side of the app — today the inspector's Issues pane. The
     /// pane additionally only appears for projects whose origin remote points at
     /// github.com, so this switch is for opting out of GitHub entirely.
@@ -600,6 +638,8 @@ final class AppSettings: ObservableObject {
             Key.interfaceRowPadding: 2.0,
             Key.agentHooksEnabled: false,
             Key.sessionControlEnabled: false,
+            Key.chiefOfStaffEnabled: false,
+            Key.chiefOfStaffBriefs: true,
             // On by default: the pane is read-only and only appears for projects
             // with a GitHub remote, so there is nothing to opt into until then.
             Key.githubIntegrationEnabled: true,
@@ -656,6 +696,11 @@ final class AppSettings: ObservableObject {
         agentOrder = store.stringArray(Key.agentOrder) ?? []
         agentHooksEnabled = store.bool(Key.agentHooksEnabled)
         sessionControlEnabled = store.bool(Key.sessionControlEnabled)
+        chiefOfStaffEnabled = store.bool(Key.chiefOfStaffEnabled)
+        chiefOfStaffAgentID = store.string(Key.chiefOfStaffAgent)
+        chiefOfStaffBriefsEnabled = store.bool(Key.chiefOfStaffBriefs)
+        chiefOfStaffWorkingDirectory = store.string(Key.chiefOfStaffWorkingDirectory) ?? ""
+        chiefOfStaffDataDirectory = store.string(Key.chiefOfStaffDataDirectory) ?? ""
         githubIntegrationEnabled = store.bool(Key.githubIntegrationEnabled)
         usageAuthorizedAgents = Set(defaults.stringArray(forKey: Key.usageAuthorizedAgents) ?? [])
         claudeKeychainDeclined = defaults.bool(forKey: Key.claudeKeychainDeclined)

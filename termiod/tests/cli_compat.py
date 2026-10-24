@@ -240,6 +240,8 @@ def main():
     compare("answer", ["sessions", "answer", "8de0b387", "yes"], [ok])
     compare("spawn with placement", ["sessions", "spawn", "fix it", "--agent", "codex", "--direction", "down", "--ratio", "0.25"], [ok])
     compare("run", ["sessions", "run", "pnpm dev", "--direction", "right"], [ok])
+    compare("spawn in a place", ["sessions", "spawn", "fix it", "--cwd", "devbox:~/src/api", "--agent", "codex"], [ok])
+    compare("run in a project", ["sessions", "run", "pnpm dev", "--project", "landing"], [ok])
     compare("read with lines", ["sessions", "read", "8de0b387", "--lines", "12"], [ok])
     compare("focus", ["sessions", "focus", "8de0b387"], [ok])
     compare("close two targets", ["sessions", "close", "8de0b387", "deadbeef"], [ok, ok])
@@ -254,6 +256,7 @@ def main():
     compare("json after positionals", ["sessions", "send", "8de0b387", "hi", "--json"], [ok])
     compare("ok-false inside text reply", ["sessions", "list"], [b'something "ok":false something\n'])
     compare("notify with title", ["notify", "--title", "ci", "done", "--json"], [ok])
+    compare("notify about a session", ["notify", "--session", "8de0b387", "landed", "--json"], [ok])
 
     print("== --wait ==")
     waited = b'{"ok":true,"status":"done","timed_out":false}'
@@ -292,6 +295,9 @@ def main():
         ("lines not number", ["sessions", "read", "8de0b387", "--lines", "two"]),
         ("wait on list", ["sessions", "list", "--wait"]),
         ("placement on send", ["sessions", "send", "8de0b387", "x", "--direction", "down"]),
+        ("place on send", ["sessions", "send", "8de0b387", "x", "--cwd", "~/src"]),
+        ("cwd missing value", ["sessions", "spawn", "x", "--cwd"]),
+        ("session missing value", ["notify", "--session"]),
         ("no-enter on spawn", ["sessions", "spawn", "x", "--no-enter"]),
         ("no-enter without target", ["sessions", "send", "x", "--no-enter"]),
         ("key without target", ["sessions", "send", "x", "--key", "escape"]),

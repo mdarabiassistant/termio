@@ -32,6 +32,7 @@ pub(crate) struct ForegroundSample {
     /// The member of that group whose argv is reported below. Equal to `pgid`
     /// whenever the group leader is still usable, which is the common case.
     pub(super) pid: Option<i32>,
+    pub(super) process: Option<crate::proc::AgentProcess>,
     pub(super) argv: Option<Vec<String>>,
     pub(super) job: bool,
     pub(super) cwd: Option<String>,
@@ -52,6 +53,7 @@ pub(crate) struct ForegroundResolution {
     /// different question, and gets dropped.
     pgid: Option<i32>,
     pid: Option<i32>,
+    process: Option<crate::proc::AgentProcess>,
     argv: Option<Vec<String>>,
     cwd: Option<String>,
     repo_root: Option<String>,
@@ -163,6 +165,7 @@ impl Foreground {
             // terminal. Dropping it is an honest gap the resolution below
             // fills; keeping it would name a program that has already exited.
             self.sample.pid = None;
+            self.sample.process = None;
             self.sample.argv = None;
             changed = true;
         }
@@ -204,6 +207,7 @@ impl Foreground {
             let _ = resolved.send(ForegroundResolution {
                 pgid,
                 pid,
+                process: pid.and_then(crate::proc::AgentProcess::read),
                 argv: pid.and_then(crate::proc::process_arguments),
                 cwd,
                 repo_root,
@@ -238,6 +242,10 @@ impl Foreground {
             self.pinned_job = resolution.executable_is_job;
         }
         let mut changed = false;
+        if self.sample.process != resolution.process {
+            self.sample.process = resolution.process;
+            changed = true;
+        }
         if self.sample.pid != resolution.pid {
             self.sample.pid = resolution.pid;
             changed = true;
@@ -338,7 +346,7 @@ mod tests {
         // First sample: the wrapper shell still holds the terminal.
         foreground.sample.pgid = Some(100);
         assert!(foreground.apply(ForegroundResolution {
-            pgid: Some(100), pid: Some(100), argv: None, cwd: None, repo_root: None,
+            pgid: Some(100), pid: Some(100), argv: None, cwd: None, repo_root: None, process: None,
             executable: Some(shell.clone()), executable_is_job: false,
         }));
         assert_eq!(foreground.executable_path().as_deref(), Some("/bin/zsh"));
@@ -346,7 +354,7 @@ mod tests {
         // The agent takes the terminal as a job of its own.
         foreground.sample.pgid = Some(200);
         foreground.apply(ForegroundResolution {
-            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None,
+            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None, process: None,
             executable: Some(agent), executable_is_job: true,
         });
         assert_eq!(foreground.executable_path().as_deref(), Some("/opt/bin/agy"));
@@ -364,11 +372,11 @@ mod tests {
 
         foreground.sample.pgid = Some(200);
         foreground.apply(ForegroundResolution {
-            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None,
+            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None, process: None,
             executable: Some(first), executable_is_job: true,
         });
         foreground.apply(ForegroundResolution {
-            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None,
+            pgid: Some(200), pid: Some(200), argv: None, cwd: None, repo_root: None, process: None,
             executable: Some(upgraded), executable_is_job: true,
         });
         assert_eq!(foreground.executable.as_ref().and_then(|e| e.inode), Some(2));

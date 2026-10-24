@@ -67,6 +67,7 @@ hosts](/docs/remote-hosts) for the same rows read from a machine’s side.
 | `status` | | Screen-scrape rules for live status — see below. |
 | `resume` | | How a reopened session continues its exact conversation — an object of launch-argument templates and a session-store descriptor. See the [Agent Terminal Protocol](/docs/atp#resume). Omit it and every launch starts fresh. |
 | `permissionBypassFlag` | | A flag appended when you toggle “skip permission prompts” for this agent. |
+| `promptArgument` | | How the agent takes a starting prompt on its command line, `{prompt}` marking where the text goes (e.g. `"-- {prompt}"`). A session started with a prompt passes it this way, so nothing typed can answer a question the agent asks at startup. Omit it and Termio types the prompt once the agent’s screen settles. |
 | `tint` | | A hex color (e.g. `"#14B8A6"`) used to tint the “working” spinner. |
 
 ### Icon

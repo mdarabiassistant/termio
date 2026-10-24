@@ -359,11 +359,15 @@ public enum Termiod {
         public let rows: UInt16
         public let cols: UInt16
         public let customName: String?
+        /// What the session is for beyond being a terminal — `chief` for the
+        /// Chief of Staff. Set at creation only; a daemon without the
+        /// `chief_of_staff` capability ignores it.
+        public let role: String?
         public let workstream: WorkstreamSpecification?
 
         public init(cwd: String, argv: [String], env: [[String]], rows: UInt16, cols: UInt16,
                     command: String? = nil, workstream: WorkstreamSpecification? = nil,
-                    customName: String? = nil) {
+                    customName: String? = nil, role: String? = nil) {
             self.cwd = cwd
             self.argv = argv
             self.command = command
@@ -372,6 +376,26 @@ public enum Termiod {
             self.cols = cols
             self.workstream = workstream
             self.customName = customName
+            self.role = role
+        }
+    }
+
+    /// Which machine has the Chief of Staff on, as one device records it
+    /// (docs/design/20261019-chief-of-staff.md §7.3).
+    public struct ChiefClaim: Codable, Sendable, Hashable {
+        /// The claiming machine's own `host_id`.
+        public let machine: String
+        /// What a refusal calls that machine.
+        public let machineName: String
+        /// The Chief of Staff session on that machine, as its app addresses it.
+        public let session: String
+        public let sinceUnix: UInt64
+
+        public init(machine: String, machineName: String, session: String, sinceUnix: UInt64) {
+            self.machine = machine
+            self.machineName = machineName
+            self.session = session
+            self.sinceUnix = sinceUnix
         }
     }
 
@@ -414,6 +438,35 @@ public enum Termiod {
 
     public struct NameSetPayload: Decodable, Sendable {
         public let session: SessionInformation
+    }
+
+    private struct GetChiefOperation: Encodable {
+        let op = "get_chief"
+        let seq: UInt64
+    }
+
+    /// `claim: nil` releases. `holder` is the requesting machine's own host id.
+    private struct SetChiefOperation: Encodable {
+        let op = "set_chief"
+        let claim: ChiefClaim?
+        let holder: String
+        let takeover: Bool
+        let seq: UInt64
+    }
+
+    /// The claim as it stands after `get_chief` or `set_chief`; `refused`
+    /// means a write changed nothing because another machine holds it.
+    public struct ChiefPayload: Decodable, Sendable {
+        public let claim: ChiefClaim?
+        public let refused: Bool
+
+        private enum CodingKeys: String, CodingKey { case claim, refused }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            claim = try container.decodeIfPresent(ChiefClaim.self, forKey: .claim)
+            refused = try container.decodeIfPresent(Bool.self, forKey: .refused) ?? false
+        }
     }
 
     private struct KillOperation: Encodable {
@@ -991,6 +1044,8 @@ public enum Termiod {
         /// which dot it becomes is the client's call.
         public let status: String
         public let agentID: String?
+        public let agentReady: Bool?
+        public let statusBlocking: Bool?
         /// The workstream's project root, **on the device** — or, for a session
         /// started without one, the root of the checkout its child is standing
         /// in, as the daemon derived it. A client attached straight to the host
@@ -1003,6 +1058,9 @@ public enum Termiod {
         public let customName: String?
         /// Absent on older daemons; zero means no user has named this session yet.
         public let customNameRevision: UInt64?
+        /// `chief` for the Chief of Staff; absent for every other session and
+        /// from a daemon that predates roles.
+        public let role: String?
         public let createdUnix: UInt64
         /// How many clients are attached right now. A non-zero count on a session
         /// this app has no row for means someone else is watching it.
@@ -1044,7 +1102,7 @@ public enum Termiod {
 
         private enum CodingKeys: String, CodingKey {
             case id, name, pid, alive, cwd, command, status, project, title, createdUnix
-            case customName, customNameRevision
+            case customName, customNameRevision, role, agentReady, statusBlocking
             case agentID = "agentId"
             case attachedClients
             case foregroundPid, foregroundArgv, foregroundJob
@@ -1061,10 +1119,13 @@ public enum Termiod {
             command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
             status = try container.decodeIfPresent(String.self, forKey: .status) ?? "unknown"
             agentID = try container.decodeIfPresent(String.self, forKey: .agentID)
+            agentReady = try container.decodeIfPresent(Bool.self, forKey: .agentReady)
+            statusBlocking = try container.decodeIfPresent(Bool.self, forKey: .statusBlocking)
             project = try container.decodeIfPresent(String.self, forKey: .project)
             title = try container.decodeIfPresent(String.self, forKey: .title)
             customName = try container.decodeIfPresent(String.self, forKey: .customName)
             customNameRevision = try container.decodeIfPresent(UInt64.self, forKey: .customNameRevision)
+            role = try container.decodeIfPresent(String.self, forKey: .role)
             createdUnix = try container.decodeIfPresent(UInt64.self, forKey: .createdUnix) ?? 0
             attachedClients = try container.decodeIfPresent(Int.self, forKey: .attachedClients) ?? 0
             // Every one of these stays optional rather than defaulting: a default
@@ -1373,6 +1434,12 @@ public enum Termiod {
         public let session: String
         public let workingSeconds: UInt64
         public let transcriptLinesGrown: UInt64
+
+        public init(session: String, workingSeconds: UInt64, transcriptLinesGrown: UInt64) {
+            self.session = session
+            self.workingSeconds = workingSeconds
+            self.transcriptLinesGrown = transcriptLinesGrown
+        }
     }
 
     /// The device revising what it knows about a session — pushed on change, on
@@ -1580,6 +1647,7 @@ public enum Termiod {
         case exited(ExitedPayload)
         case sessions(SessionsPayload)
         case nameSet(NameSetPayload)
+        case chief(ChiefPayload)
         case uploadOpened(UploadOpenedPayload)
         case uploadAck(UploadAckPayload)
         case uploadCommitted(UploadCommittedPayload)
@@ -1631,6 +1699,8 @@ public enum Termiod {
             return .exited(try decoder.decode(ExitedPayload.self, from: payload))
         case "name_set":
             return .nameSet(try decoder.decode(NameSetPayload.self, from: payload))
+        case "chief":
+            return .chief(try decoder.decode(ChiefPayload.self, from: payload))
         case "sessions":
             return .sessions(try decoder.decode(SessionsPayload.self, from: payload))
         case "upload_opened":
@@ -1802,6 +1872,16 @@ public enum Termiod {
 
     public static func listPayload(seq: UInt64 = 1) throws -> Data {
         try encodeControl(ListOperation(seq: seq))
+    }
+
+    public static func getChiefPayload(seq: UInt64 = 1) throws -> Data {
+        try encodeControl(GetChiefOperation(seq: seq))
+    }
+
+    public static func setChiefPayload(
+        claim: ChiefClaim?, holder: String, takeover: Bool = false, seq: UInt64 = 1
+    ) throws -> Data {
+        try encodeControl(SetChiefOperation(claim: claim, holder: holder, takeover: takeover, seq: seq))
     }
 
     public static func killPayload(target: String, seq: UInt64 = 1) throws -> Data {

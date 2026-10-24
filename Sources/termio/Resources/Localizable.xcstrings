@@ -8914,6 +8914,236 @@
           }
         }
       }
+    },
+    "Brief me when sessions need me": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话需要我时向我简报"
+          }
+        }
+      }
+    },
+    "Chief of Staff": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "幕僚长"
+          }
+        }
+      }
+    },
+    "Choose a working folder you can read.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择可读取的工作文件夹。"
+          }
+        }
+      }
+    },
+    "Choose an existing working folder.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择已存在的工作文件夹。"
+          }
+        }
+      }
+    },
+    "Couldn’t open the instructions file.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开指令文件。"
+          }
+        }
+      }
+    },
+    "Data Folder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据文件夹"
+          }
+        }
+      }
+    },
+    "Edit Instructions…": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑指令…"
+          }
+        }
+      }
+    },
+    "Existing files stay in their current folder.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "现有文件保留在原文件夹中。"
+          }
+        }
+      }
+    },
+    "If that machine is gone for good, turn it on here instead.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果那台机器已不会再用，可以改为在这里开启。"
+          }
+        }
+      }
+    },
+    "One machine at a time: turning it on is refused while another machine Termio can reach has it on.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同一时间只能有一台机器开启：如果 Termio 能连接到的另一台机器已开启，这里就无法开启。"
+          }
+        }
+      }
+    },
+    "Questions, finished turns, and stalls from every session go to the Chief of Staff, which decides what to tell you.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每个会话的提问、已完成的回合和停滞都会交给幕僚长，由它决定要告诉你什么。"
+          }
+        }
+      }
+    },
+    "Runs one agent that can see and drive every session on your machines. Talk to it in its pane at the top of the sidebar, or from your phone.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行一个 Agent，它可以查看并驱动你所有机器上的每个会话。在侧边栏顶部它的面板里，或用手机和它对话。"
+          }
+        }
+      }
+    },
+    "Save Folders": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存文件夹"
+          }
+        }
+      }
+    },
+    "Save and Restart": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存并重新启动"
+          }
+        }
+      }
+    },
+    "Separate working and data folders require Claude Code or Codex.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要使用独立的工作和数据文件夹，请选择 Claude Code 或 Codex。"
+          }
+        }
+      }
+    },
+    "Starts the Chief of Staff here so it can read your projects.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "幕僚长从此文件夹启动，以便读取你的项目。"
+          }
+        }
+      }
+    },
+    "Stores its instructions, notes, and intermediate files.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存储其指令、笔记和中间文件。"
+          }
+        }
+      }
+    },
+    "The Chief of Staff is on %@.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "幕僚长正在 %@ 上运行。"
+          }
+        }
+      }
+    },
+    "The Chief of Staff replied. Open it to read.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "幕僚长已回复。打开即可查看。"
+          }
+        }
+      }
+    },
+    "The data folder’s Claude settings are not valid JSON.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据文件夹中的 Claude 设置不是有效的 JSON。"
+          }
+        }
+      }
+    },
+    "Turn On Here Instead": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "改为在此开启"
+          }
+        }
+      }
+    },
+    "Use an absolute folder path or a path starting with ~/.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入文件夹的绝对路径或以 ~/ 开头的路径。"
+          }
+        }
+      }
+    },
+    "Working Folder": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作文件夹"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

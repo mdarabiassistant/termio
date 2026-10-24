@@ -35,6 +35,57 @@
 //! every caller does the same thing with all of them: keep the last known
 //! answer and try again next tick.
 
+/// A hook's agent incarnation. PID alone is insufficient after reuse, and
+/// birth time alone survives exec into a different program. Read off the byte
+/// path and compared again before returning readiness to a client.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentProcess {
+    pub pid: i32,
+    pub pgid: i32,
+    pub started: (u64, u64),
+    pub executable: String,
+}
+
+impl AgentProcess {
+    pub fn read(pid: i32) -> Option<Self> {
+        let before = imp::process_birth(pid)?;
+        let executable = imp::agent_executable_path(pid)?;
+        let after = imp::process_birth(pid)?;
+        if before != after { return None; }
+        Some(Self { pid, pgid: before.1, started: (before.2, before.3), executable })
+    }
+
+    pub fn is_current(&self) -> bool {
+        Self::read(self.pid).as_ref() == Some(self)
+    }
+}
+
+/// A hook is a descendant of the agent that invoked it. Walk only that
+/// ancestry, never the process table, and require a hook-capable manifest.
+/// The daemon also checks that this process owns the target session's tty.
+pub fn hook_agent_processes() -> Vec<AgentProcess> {
+    let catalog = crate::agent::manifest::AgentCatalog::load();
+    let mut candidates = Vec::new();
+    let mut pid = unsafe { libc::getppid() };
+    for _ in 0..32 {
+        if pid <= 1 { break; }
+        let Some(identity) = AgentProcess::read(pid) else { break; };
+        let Some(argv) = process_arguments(pid) else { break; };
+        let name = argv.first().and_then(|s| std::path::Path::new(s).file_name());
+        if name.is_some() && catalog.all.iter().any(|agent| {
+            agent.hooks.is_some() && agent.command.as_deref()
+                .and_then(|s| std::path::Path::new(s).file_name()) == name
+        }) && identity.is_current() {
+            candidates.push(identity);
+        }
+        let Some(parent) = imp::process_birth(pid) else { break; };
+        pid = parent.0;
+    }
+    // Codex invokes hooks through an app-server child in its own process
+    // group. The session actor selects the ancestor in its terminal's group.
+    candidates
+}
+
 /// The binary a process is running, pinned tightly enough to notice it being
 /// swapped underneath. The inode is the discriminating half: an agent that
 /// updates itself in place keeps its path and changes its file.
@@ -70,12 +121,34 @@ impl ExecutableIdentity {
 mod imp {
     use super::ExecutableIdentity;
 
+    pub fn process_birth(pid: i32) -> Option<(i32, i32, u64, u64)> {
+        if pid <= 0 { return None; }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0,
+            &mut info as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int) };
+        if size as usize != std::mem::size_of::<libc::proc_bsdinfo>() || info.pbi_status == SZOMB {
+            return None;
+        }
+        Some((info.pbi_ppid as i32, info.pbi_pgid as i32, info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+
     /// Reads a process's full argument vector from the kernel
     /// (`KERN_PROCARGS2`), whose buffer is laid out
     /// `[argc: i32][exec path]\0…\0[argv0]\0[argv1]\0…[env]`. Own-user
     /// processes only, which is exactly the scope here: the session child and
     /// its descendants.
     pub fn process_arguments(pid: i32) -> Option<Vec<String>> {
+        super::split_procargs2(&procargs2(pid)?)
+    }
+
+    pub fn agent_executable_path(pid: i32) -> Option<String> {
+        // proc_pidpath fails once an updater unlinks the running binary.
+        // KERN_PROCARGS2 retains the exec path for that process's lifetime.
+        super::procargs2_executable_path(&procargs2(pid)?)
+    }
+
+    fn procargs2(pid: i32) -> Option<Vec<u8>> {
         let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size: libc::size_t = 0;
         let probe = unsafe {
@@ -106,7 +179,7 @@ mod imp {
             return None;
         }
         buffer.truncate(size);
-        super::split_procargs2(&buffer)
+        Some(buffer)
     }
 
     /// The process's current working directory, read from the kernel
@@ -264,6 +337,18 @@ mod imp {
 mod imp {
     use super::ExecutableIdentity;
 
+    pub fn agent_executable_path(pid: i32) -> Option<String> {
+        executable_path(pid)
+    }
+
+    pub fn process_birth(pid: i32) -> Option<(i32, i32, u64, u64)> {
+        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = raw.rsplit_once(')')?.1.split_whitespace().collect();
+        if matches!(*fields.first()?, "Z" | "X" | "x") { return None; }
+        Some((fields.get(1)?.parse().ok()?, fields.get(2)?.parse().ok()?,
+              fields.get(19)?.parse().ok()?, 0))
+    }
+
     /// `/proc/<pid>/cmdline` is argv verbatim, NUL-separated and NUL-
     /// terminated. Kernel threads have an empty one; so does a process caught
     /// mid-exec, and both are correctly "no answer yet".
@@ -374,6 +459,9 @@ mod imp {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::ExecutableIdentity;
+
+    pub fn process_birth(_pid: i32) -> Option<(i32, i32, u64, u64)> { None }
+    pub fn executable_path(_pid: i32) -> Option<String> { None }
 
     pub fn process_arguments(_pid: i32) -> Option<Vec<String>> {
         None
@@ -534,6 +622,15 @@ fn parse_process_stat(raw: &str) -> Option<(Liveness, i32)> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn procargs2_executable_path(buffer: &[u8]) -> Option<String> {
+    let header: [u8; 4] = buffer.get(..4)?.try_into().ok()?;
+    if i32::from_ne_bytes(header) <= 0 { return None; }
+    let rest = buffer.get(4..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    string_until_nul(&rest[..end])
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn split_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
     let header = std::mem::size_of::<i32>();
     if buffer.len() <= header {
@@ -569,7 +666,7 @@ fn split_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
     (!arguments.is_empty()).then_some(arguments)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn string_until_nul(bytes: &[u8]) -> Option<String> {
     let end = bytes
         .iter()
@@ -593,6 +690,22 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::rc::Rc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn readiness_identity_expires_on_exit_and_rejects_reused_pid_or_exec() {
+        let mut child = Sleeper::spawn("/");
+        let identity = AgentProcess::read(child.pid()).expect("live process identity");
+        assert!(identity.is_current());
+        let mut reused = identity.clone();
+        reused.started.0 += 1;
+        assert!(!reused.is_current(), "the same pid with a different birth is not ready");
+        let mut replaced = identity.clone();
+        replaced.executable.push_str(".different");
+        assert!(!replaced.is_current(), "exec invalidates readiness even with the same birth");
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(!identity.is_current());
+    }
 
     /// Spawn a real child and wait until the kernel agrees it has exec'd — the
     /// window between `fork` and `exec` is real, and a test that reads through
@@ -641,6 +754,22 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    #[test]
+    fn agent_identity_survives_an_executable_removed_by_an_update() {
+        let folder = std::env::temp_dir().join(format!("termiod-agent-update-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("test directory");
+        let path = folder.join("sleep");
+        std::fs::copy(sleep_binary(), &path).expect("copy test executable");
+        let child = Sleeper(Command::new(&path).arg("30").spawn().expect("start copied executable"));
+        wait_for(|| process_arguments(child.pid()).is_some_and(|args| {
+            args.first().is_some_and(|arg| arg == &path.to_string_lossy())
+        }));
+        let identity = AgentProcess::read(child.pid()).expect("live agent identity");
+        std::fs::remove_file(&path).expect("unlink running executable as an updater does");
+        std::fs::remove_dir(&folder).expect("remove test directory");
+        assert!(identity.is_current(), "the process did not exit or exec during its binary update");
     }
 
     #[test]
@@ -726,12 +855,15 @@ mod tests {
         buffer.extend_from_slice(b"/usr/local/bin/claude\0\0\0");
         buffer.extend_from_slice(b"claude\0--resume\0");
         buffer.extend_from_slice(b"PATH=/usr/bin\0");
+        assert_eq!(procargs2_executable_path(&buffer).as_deref(), Some("/usr/local/bin/claude"));
         let argv = split_procargs2(&buffer).expect("argv from a well-formed buffer");
         assert_eq!(argv, vec!["claude".to_string(), "--resume".to_string()]);
     }
 
     #[test]
     fn rejects_a_truncated_procargs2_buffer() {
+        assert!(procargs2_executable_path(&[]).is_none());
+        assert!(procargs2_executable_path(&[1, 0, 0, 0, b'/']).is_none());
         assert!(split_procargs2(&[]).is_none());
         assert!(split_procargs2(&0i32.to_ne_bytes()).is_none());
         assert!(split_procargs2(&(-1i32).to_ne_bytes()).is_none());

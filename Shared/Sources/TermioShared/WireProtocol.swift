@@ -13,11 +13,13 @@ import Foundation
 ///      v2 roster, so both minimums move with it: the mismatch has to say
 ///      "update the other end" rather than draw an empty project list.
 ///   3: 2026-10-08: session rename requests and daemon-confirmed results.
+///   4: 2026-10-21: Chief of Staff sends, roles, and notices.
 public enum Wire {
     /// A peer that predates the field entirely. Absent decodes to this.
     public static let legacy = 0
     /// This build's revision.
-    public static let current = 3
+    public static let current = 4
+    public static let chiefOfStaff = 4
     /// Oldest Mac this phone will talk to.
     public static let minimumServer = 2
     /// Oldest phone this Mac will serve.
@@ -64,7 +66,11 @@ public enum CompanionControl: Codable, Sendable, Equatable {
     /// pairing token from the Mac's QR code. Until it lands, the server sends
     /// nothing and refuses every other message — the port may sit behind a
     /// public tunnel URL, where "connected" must not mean "trusted".
-    case auth(token: String, wire: Int)
+    case auth(token: String, wire: Int, lastNoticeID: String? = nil)
+    /// Sends words to the Chief of Staff without attaching a phone viewport.
+    case send(sessionID: String, text: String)
+    case sent(sessionID: String)
+    case notice(WireNotice)
     /// The client asks to bridge a specific session's PTY (roster session id).
     /// Sent once, immediately after the socket opens; the server replays its
     /// recent output and starts streaming.
@@ -216,8 +222,22 @@ public enum CompanionControl: Codable, Sendable, Equatable {
     public func encoded() -> String {
         // Small, hand-stable JSON so both ends agree without a schema tool.
         switch self {
-        case .auth(let token, let wire):
-            return Self.json(["t": "auth", "token": token, "wire": wire])
+        case .auth(let token, let wire, let lastNoticeID):
+            var fields: [String: Any] = ["t": "auth", "token": token, "wire": wire]
+            if let lastNoticeID { fields["lastNotice"] = lastNoticeID }
+            return Self.json(fields)
+        case .send(let sessionID, let text):
+            return Self.json(["t": "send", "session": sessionID, "text": text])
+        case .sent(let sessionID):
+            return Self.json(["t": "sent", "session": sessionID])
+        case .notice(let notice):
+            var fields: [String: Any] = [
+                "t": "notice", "id": notice.id, "from": notice.from,
+                "title": notice.title, "body": notice.body, "at": notice.at,
+            ]
+            if let about = notice.about { fields["about"] = about }
+            if !notice.speak { fields["speak"] = false }
+            return Self.json(fields)
         case .attach(let sessionID):
             return #"{"t":"attach","session":"\#(sessionID)"}"#
         case .start(let projectID, let agent):
@@ -359,7 +379,24 @@ public enum CompanionControl: Codable, Sendable, Equatable {
         switch type {
         case "auth":
             guard let token = obj["token"] as? String else { return nil }
-            return .auth(token: token, wire: obj["wire"] as? Int ?? Wire.legacy)
+            return .auth(token: token, wire: obj["wire"] as? Int ?? Wire.legacy,
+                         lastNoticeID: obj["lastNotice"] as? String)
+        case "send":
+            guard let sessionID = obj["session"] as? String,
+                  let text = obj["text"] as? String else { return nil }
+            return .send(sessionID: sessionID, text: text)
+        case "sent":
+            guard let sessionID = obj["session"] as? String else { return nil }
+            return .sent(sessionID: sessionID)
+        case "notice":
+            guard let id = obj["id"] as? String,
+                  let from = obj["from"] as? String,
+                  let title = obj["title"] as? String,
+                  let body = obj["body"] as? String,
+                  let at = obj["at"] as? Int64 else { return nil }
+            return .notice(WireNotice(id: id, from: from, about: obj["about"] as? String,
+                                      title: title, body: body, at: at,
+                                      speak: obj["speak"] as? Bool ?? true))
         case "attach":
             guard let sessionID = obj["session"] as? String else { return nil }
             return .attach(sessionID: sessionID)
@@ -668,6 +705,31 @@ public struct WireFile: Codable, Sendable, Equatable {
     public var data: Data? { Data(base64Encoded: base64) }
 }
 
+/// IDs are session UUIDs from the roster; an empty `from` is an unlinked CLI
+/// notice. `at` is Unix milliseconds. A phone remembers the latest chief notice
+/// ID it showed and sends it as `auth.lastNotice` when reconnecting.
+public struct WireNotice: Codable, Sendable, Equatable {
+    public let id: String
+    public let from: String
+    public let about: String?
+    public let title: String
+    public let body: String
+    public let at: Int64
+    /// False for the turn-without-notice fallback, which must stay unspoken.
+    public let speak: Bool
+
+    public init(id: String, from: String, about: String? = nil, title: String,
+                body: String, at: Int64, speak: Bool = true) {
+        self.id = id
+        self.from = from
+        self.about = about
+        self.title = title
+        self.body = body
+        self.at = at
+        self.speak = speak
+    }
+}
+
 // MARK: - Roster (server → client)
 
 /// One session as it appears in the phone's tree. `agent` is the stable id into
@@ -687,10 +749,12 @@ public struct RosterSession: Codable, Sendable, Equatable {
     /// for sessions in the project's main checkout, so the phone can label
     /// only the rows that live somewhere other than the project's own branch.
     public let branch: String?
+    public let role: String?
+    public let ready: Bool?
 
     public init(
         id: String, title: String, agent: String, status: String,
-        subtitle: String? = nil, branch: String? = nil
+        subtitle: String? = nil, branch: String? = nil, role: String? = nil, ready: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -698,6 +762,8 @@ public struct RosterSession: Codable, Sendable, Equatable {
         self.status = status
         self.subtitle = subtitle
         self.branch = branch
+        self.role = role
+        self.ready = ready
     }
 }
 

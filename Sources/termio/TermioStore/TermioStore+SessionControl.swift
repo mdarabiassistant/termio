@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import GhosttyKit
 import GhosttyTerminal
+import TermioShared
 import os
 
 /// Handles `termio sessions …` requests from `SessionControlListener`. Every
@@ -40,13 +41,22 @@ extension TermioStore {
             return controlError(request, "no_scope",
                 "Couldn’t tell which project you’re in. Run this from inside a Termio session.")
         }
+        // In a turn the user didn't start, the Chief of Staff can read and speak
+        // but not act: an event produces a notice, never an action
+        // (docs/design/20261019-chief-of-staff.md §7.7).
+        if scope.isFleet, ChiefOfStaffGuard.refuses(op: request.op, origin: chiefOfStaff.origin) {
+            return controlError(request, "not_user_turn", """
+                This turn began with a [termio] event, not with the user. Events produce \
+                notices, never actions: tell the user what happened, and act once they answer.
+                """)
+        }
 
         switch request.op {
         case "list": return listSessions(in: scope, request: request)
         case "send", "answer": return await sendText(request, in: scope)
         case "close": return closeTab(request, in: scope)
         case "focus": return focusSession(request, in: scope)
-        case "read": return readScreen(request, in: scope)
+        case "read": return await readScreen(request, in: scope)
         case "notify": return notify(request, in: scope)
         default:
             return controlError(request, "bad_op", "Unknown op '\(request.op)'.")
@@ -70,12 +80,39 @@ extension TermioStore {
         let caller = request.callerSession
             .flatMap { UUID(uuidString: $0) }
             .flatMap { session($0) }
+        // `--session`: the session the notice is about, so a click opens that one
+        // instead of the caller. Resolved in the caller's own scope.
+        var about: Session?
+        if let token = request.about?.trimmingCharacters(in: .whitespaces), !token.isEmpty {
+            switch resolveTarget(token, in: scope) {
+            case .found(let session):
+                about = session
+            case .notFound:
+                return controlError(request, "not_found", targetNotFoundMessage(request.about))
+            case .ambiguous:
+                return controlError(request, "ambiguous",
+                    "'\(token)' matches more than one session; use a longer id.")
+            }
+        }
+        if scope.isFleet {
+            // The Chief of Staff's voice: kept for its row and the phone, and a
+            // banner only when its pane isn't already in front of you.
+            let title = localized("Chief of Staff")
+            noteChiefOfStaffNotice(body, about: about?.id)
+            if !chiefOfStaffIsInView() {
+                TaskNotificationCenter.shared.postManual(
+                    title: title, body: body,
+                    project: about.flatMap { project(for: $0.id) }, session: about ?? caller)
+            }
+            return control(request, ok: true, text: "notified", json: ["notified": true, "title": title])
+        }
         let title = request.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = (title?.isEmpty == false)
             ? title!
             : caller.map { effectiveAgent(for: $0).displayName } ?? "Termio"
         TaskNotificationCenter.shared.postManual(
-            title: resolvedTitle, body: body, project: scope.project, session: caller)
+            title: resolvedTitle, body: body, project: scope.project, session: about ?? caller)
+        publishCompanionNotice(from: caller?.id, about: about?.id, title: resolvedTitle, body: body)
         return control(request, ok: true, text: "notified",
                        json: ["notified": true, "title": resolvedTitle])
     }
@@ -167,6 +204,7 @@ extension TermioStore {
     }
 
     private func listSessions(in scope: ControlScope, request: ControlRequest) -> Data {
+        let machines = fleetMachines()
         let entries = scope.sessions.map { session -> [String: Any] in
             var entry: [String: Any] = [
                 "link": sessionLink(for: session),
@@ -191,6 +229,9 @@ extension TermioStore {
             if undeliveredPrompts.contains(session.id) {
                 entry["prompt_undelivered"] = true
             }
+            // What routing by machine and folder needs (docs/design/
+            // 20261019-chief-of-staff.md §7.4). Additive, so every caller gets it.
+            entry.merge(routingFields(for: session, machines: machines)) { current, _ in current }
             return entry
         }
         // Text output is a column table, the deep link first: the link IS the
@@ -204,7 +245,11 @@ extension TermioStore {
             let titles = ["LINK", "AGENT", "STATUS", "TITLE"]
             let rows = scope.sessions.map { session -> [String] in
                 let description = statusDescription(for: session.id)
-                let title = displayTitle(for: session)
+                // Across machines a title alone is ambiguous; the fleet's rows
+                // say where each session runs.
+                let title = scope.isFleet
+                    ? "\(displayTitle(for: session)) (\(placeLabel(for: session, machines: machines)))"
+                    : displayTitle(for: session)
                 return [
                     sessionLink(for: session),
                     effectiveAgent(for: session).wireName.lowercased(),
@@ -223,8 +268,73 @@ extension TermioStore {
             }
             text = ([header, render(titles)] + rows.map(render)).joined(separator: "\n")
         }
-        return control(request, ok: true, text: text, json: ["project": scope.name, "sessions": entries])
+        var json: [String: Any] = ["project": scope.name, "sessions": entries]
+        if scope.isFleet { json["devices"] = fleetDevices(machines) }
+        return control(request, ok: true, text: text, json: json)
     }
+
+    /// Where a session runs, as the fleet names it: the machine (`local` for
+    /// this Mac), the workspace and section it is filed in, its folder, the
+    /// branch when Termio already tracks that folder, the name it was given,
+    /// whether it is in front of you, and when its status last changed.
+    private func routingFields(for session: Session, machines: FleetMachines) -> [String: Any] {
+        var fields: [String: Any] = [
+            "device": machines.name(forAlias: machineAlias(of: session)) ?? "local",
+        ]
+        if let workspace = workspace(for: session.id) { fields["workspace"] = workspace.name }
+        switch locate(session.id) {
+        case .project?:
+            fields["section"] = "project"
+            if let project = project(for: session.id) { fields["project_name"] = project.name }
+        case .terminals?: fields["section"] = "terminals"
+        case .chats?: fields["section"] = "chats"
+        case nil: break
+        }
+        let folder = sessionFolder(session)
+        if !folder.isEmpty {
+            fields["cwd"] = folder
+            // Only a branch Termio already watches: reading git per row here would
+            // put a process spawn on the request path for every session listed.
+            if session.termiodRemoteHost == nil, let branch = branch(forFolder: folder) {
+                fields["branch"] = branch
+            }
+        }
+        if let given = session.givenTitle { fields["custom_name"] = given }
+        if selectedSessionID == session.id { fields["focused"] = true }
+        if let since = runtimes[session.id]?.statusSince {
+            fields["status_since"] = Self.isoTimestamp.string(from: since)
+        }
+        return fields
+    }
+
+    /// `this Mac ~/src/termio`, or `devbox ~/src/api`: the machine and folder a
+    /// fleet row names.
+    private func placeLabel(for session: Session, machines: FleetMachines) -> String {
+        let machine = machines.name(forAlias: machineAlias(of: session))
+        let folder = sessionFolder(session)
+        guard let machine else {
+            let local = ChiefOfStaffFeed.abbreviated(folder, home: NSHomeDirectory())
+            return local.isEmpty ? Self.thisMacLabel : "\(Self.thisMacLabel) \(local)"
+        }
+        return folder.isEmpty ? machine : "\(machine) \(folder)"
+    }
+
+    /// Every machine Termio knows, once each, so "the devbox is offline" is an
+    /// answer the Chief of Staff can give instead of a timeout it has to explain.
+    private func fleetDevices(_ machines: FleetMachines) -> [[String: Any]] {
+        let remote = machines.machines.map { machine -> [String: Any] in
+            var entry: [String: Any] = ["device": machine.name]
+            if !machine.aliases.isEmpty { entry["aliases"] = machine.aliases }
+            let seen = ([machine.name] + machine.aliases)
+                .compactMap { TermiodDeviceRegistry.shared.device(for: TermiodRoute(sshAlias: $0))?.lastSeen }
+                .max()
+            if let seen { entry["last_seen"] = Self.isoTimestamp.string(from: seen) }
+            return entry
+        }
+        return [["device": "local"]] + remote
+    }
+
+    private static let isoTimestamp = ISO8601DateFormatter()
 
     private func sendText(_ request: ControlRequest, in scope: ControlScope) async -> Data {
         let payload = request.text ?? ""
@@ -269,6 +379,14 @@ extension TermioStore {
         }
         switch resolveTarget(token, in: scope) {
         case .found(let session):
+            // One writer at a time holds between you and your own Chief of Staff
+            // too: its text landing mid-sentence would garble both.
+            if scope.isFleet, userTypedRecently(in: session.id, within: Self.userTypingWindow) {
+                return controlError(request, "user_typing", """
+                    The user is typing in \(sessionLink(for: session)) right now. Tell them, and \
+                    send this once they're done.
+                    """)
+            }
             let state = surface(for: session)
             return await deliver(payload, keys: keys, to: session, state: state, request: request)
         case .notFound:
@@ -284,6 +402,18 @@ extension TermioStore {
     /// help gets a Claude), then to the user's preferred chat agent; `--agent`
     /// overrides both.
     private func spawnAndSend(_ request: ControlRequest, in scope: ControlScope, payload: String) async -> Data {
+        // A place outside the caller's own project is the Chief of Staff's to
+        // name, and the Chief of Staff always names one: it has no project of
+        // its own for a session to default into.
+        if scope.isFleet {
+            return await spawnInPlace(request, payload: payload)
+        }
+        guard request.placeCwd == nil, request.placeProject == nil else {
+            return controlError(request, "bad_place", """
+                --cwd and --project start a session outside your own project, which only \
+                the Chief of Staff may do.
+                """)
+        }
         // Who is asking, resolved against this project's roster: a sibling agent
         // spawning from inside termio, or nil for a spawn from an outside shell.
         // Drives both defaults below — the new agent's kind and where its pane lands.
@@ -339,12 +469,33 @@ extension TermioStore {
         guard let freshID, let fresh = session(freshID) else {
             return controlError(request, "start_failed", "Couldn’t start the session.")
         }
-        let state = surface(for: fresh)
         // The envelope is agent guidance — typed into a shell it would *execute*
         // as commands, so a `run` session gets the bare command line only.
         let delivered = preset.isShell
             ? payload
             : (callerEnvelope(for: request) ?? "") + payload
+        return await deliverToFreshSession(request, fresh: fresh, payload: delivered)
+    }
+
+    /// Hands a spawn's prompt (or a `run`'s command line) to the session just
+    /// created for it. Shared by a sibling's spawn and the Chief of Staff's.
+    private func deliverToFreshSession(
+        _ request: ControlRequest, fresh: Session, payload delivered: String
+    ) async -> Data {
+        // An agent that takes its prompt on its command line gets it there, so no
+        // key is typed that a question it asks at startup — a folder-trust prompt,
+        // whose first choice is "No, exit" — could take as its answer. Registered
+        // before the surface exists, because creating the surface is the launch
+        // that reads it.
+        if fresh.agent.promptArgument != nil {
+            launchPrompts[fresh.id] = delivered
+            _ = surface(for: fresh)
+            watchLaunchedPrompt(fresh.id)
+            guard request.wantsWait else { return spawnQueuedReply(request, fresh) }
+            return await waitForReply(request, session: fresh, cursorAtSend: nil,
+                                      created: true, launching: true)
+        }
+        let state = surface(for: fresh)
         // With `--wait`, the caller opted back into blocking — but for the *outcome*
         // (§4.4), never just the plumbing: boot-settle, deliver, then hold the reply
         // until the spawned agent's first turn settles.
@@ -393,6 +544,94 @@ extension TermioStore {
         return spawnQueuedReply(request, fresh)
     }
 
+    /// How long an agent launched with its prompt has to show it started before
+    /// its session counts as waiting on the user. Starting takes a few seconds;
+    /// the margin is for slow startup hooks.
+    static let launchStartWindow: TimeInterval = 20
+
+    /// Watches an agent launched with its prompt on its command line. One that
+    /// hasn't shown it started within `launchStartWindow` is held by a question of
+    /// its own — a folder-trust prompt, a hooks review — and nothing reports that:
+    /// the agent runs no hook until the user answers. So the session is marked as
+    /// waiting on the user (`heldAtStartup`), which puts the question in front of
+    /// them the way any other is: an amber row, a Chief of Staff event carrying
+    /// the screen, a `--wait` that returns it. Someone looking at the session
+    /// already sees the question, so the mark goes up when they look away. What
+    /// counts as started is decided where reports arrive (`applyTermiodStatus`),
+    /// which drops the session from `launchesAwaitingStart` and ends the watch.
+    private func watchLaunchedPrompt(_ id: Session.ID) {
+        let watching = launchesAwaitingStart[id] != nil
+        launchesAwaitingStart[id] = Date().addingTimeInterval(Self.launchStartWindow)
+        // One watch per session; calling again only moves its deadline.
+        guard !watching else { return }
+        Task { [weak self] in
+            while let self, let deadline = self.launchesAwaitingStart[id] {
+                if deadline.timeIntervalSinceNow > 0 {
+                    try? await Task.sleep(for: .seconds(deadline.timeIntervalSinceNow))
+                    continue
+                }
+                if self.isViewing(id) {
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
+                self.launchesAwaitingStart.removeValue(forKey: id)
+                guard let session = self.session(id), self.processEnd(for: session) == nil,
+                      self.status(for: id) != .needsAttention
+                else { return }
+                Log.termiod.notice("""
+                \(self.sessionLink(for: session), privacy: .public) hasn't started its prompt \
+                after \(Int(Self.launchStartWindow))s; showing it as waiting on you
+                """)
+                self.heldAtStartup.insert(id)
+                self.flagBlockingAttention(for: id)
+                return
+            }
+        }
+    }
+
+    /// Whether `id` is an agent launched with its prompt that hasn't yet shown it
+    /// started: still being watched, or already marked as waiting on you.
+    func isStartingUp(_ id: Session.ID) -> Bool {
+        launchesAwaitingStart[id] != nil || heldAtStartup.contains(id)
+    }
+
+    /// Input reached an agent that hasn't started yet. Into one marked as waiting
+    /// on you, it is the answer: nothing else clears that mark until the agent
+    /// reports, and an agent told "No, exit" never does, so it is cleared here.
+    /// Either way the watch starts over, in case the agent asks something else
+    /// before it starts.
+    func noteInputBeforeStart(_ id: Session.ID) {
+        if heldAtStartup.remove(id) != nil {
+            setStatus(.idle, for: id)
+        } else if launchesAwaitingStart[id] == nil {
+            return
+        }
+        watchLaunchedPrompt(id)
+    }
+
+    /// `setStatus` kept a held launch waiting on you over another write. Nothing
+    /// should make one: the three ways a mark ends each drop it before writing.
+    /// So the refusal is recorded with what was attempted, and in a dev build with
+    /// the caller, to find whoever tried.
+    func refuseStatusOverHeldLaunch(_ status: SessionStatus, for id: Session.ID) {
+        let link = session(id).map { sessionLink(for: $0) } ?? id.uuidString
+        let caller = AppChannel.isDev
+            ? Thread.callStackSymbols.dropFirst(2).prefix(4).joined(separator: " | ") : ""
+        Log.termiod.notice("""
+        \(link, privacy: .public) is waiting on you before it starts; kept that over \
+        \(Self.statusToken(status), privacy: .public) \(caller, privacy: .public)
+        """)
+    }
+
+    /// How a session's process ended, as a person reads it ("exit 1"), or nil
+    /// while it runs. The exit this app saw comes first; a tombstone says the same
+    /// only once the next roster sweep brings it.
+    func processEnd(for session: Session) -> String? {
+        if let code = parkedExits[session.id] { return "exit \(code)" }
+        guard let tombstone = termiodEndReason(for: session) else { return nil }
+        return tombstone.exitStatus.map { "exit \($0)" } ?? tombstone.reason
+    }
+
     /// The provenance envelope prepended to a spawned session's prompt when the
     /// spawner is itself a termio session (design doc §4.6) — without it the new
     /// agent has no idea who spawned it and can only stop as `needs-you` and hope.
@@ -420,6 +659,163 @@ extension TermioStore {
         """
     }
 
+    /// How long a keystroke in a session holds the Chief of Staff's sends off it.
+    static let userTypingWindow: TimeInterval = 4
+
+    /// The Chief of Staff's spawn and run (docs/design/20261019-chief-of-staff.md
+    /// §7.4): a session started where it names — a folder on this Mac,
+    /// `machine:path` on another one, or a project — in a tab of its own that
+    /// never takes focus. No provenance envelope: a session it starts reaches it
+    /// through the event feed, not by sending back.
+    private func spawnInPlace(_ request: ControlRequest, payload: String) async -> Data {
+        let preset: AgentDefinition
+        if let name = request.agent, !name.isEmpty {
+            guard let resolved = AgentPreset.resolve(name) else {
+                let names = AgentPreset.codingAgents.map(\.rawValue).joined(separator: ", ")
+                return controlError(request, "bad_agent",
+                    "Unknown agent '\(name)'. Try one of: \(names), or terminal.")
+            }
+            preset = resolved
+        } else if let fallback = chiefOfStaffAgent() {
+            preset = fallback
+        } else {
+            return controlError(request, "no_agent", "No coding agent is enabled — pass --agent <name>.")
+        }
+
+        let fresh: Session
+        if let token = request.placeProject?.trimmingCharacters(in: .whitespaces), !token.isEmpty {
+            guard request.placeCwd == nil else {
+                return controlError(request, "bad_place", "Name one place: --cwd or --project, not both.")
+            }
+            let matches = projects.filter {
+                $0.name.lowercased() == token.lowercased() || $0.path == token
+            }
+            guard let project = matches.first, matches.count == 1 else {
+                return controlError(request, matches.isEmpty ? "not_found" : "ambiguous",
+                    matches.isEmpty
+                        ? "No project named '\(token)'. `--cwd` takes any folder."
+                        : "'\(token)' names more than one project; pass its path.")
+            }
+            guard !isOnAnotherDevice(project) else {
+                return controlError(request, "bad_place", """
+                    \(project.name) is on another machine. Name its folder there instead: \
+                    --cwd <machine>:<path>.
+                    """)
+            }
+            guard let id = addSession(to: project.id, agent: preset, takeFocus: false),
+                  let created = session(id) else {
+                return controlError(request, "start_failed", "Couldn’t start the session.")
+            }
+            fresh = created
+        } else if let raw = request.placeCwd {
+            let devices = DeviceRoster.known(in: self).compactMap(\.alias)
+            switch SpawnPlace.parse(raw, knownDevices: Set(devices)) {
+            case .failure(.empty):
+                return controlError(request, "no_place", "--cwd needs a folder: [machine:]path.")
+            case .failure(.unknownDevice(let alias)):
+                let known = devices.isEmpty ? "only this Mac" : devices.joined(separator: ", ")
+                return controlError(request, "unknown_device",
+                    "No machine called '\(alias)'. Termio knows \(known).")
+            case .success(let place):
+                if let host = place.device {
+                    guard let created = await addRemoteSession(host: host, path: place.path, agent: preset) else {
+                        return controlError(request, "start_failed",
+                            "Couldn’t start a session on \(host). Is it reachable, with termiod set up?")
+                    }
+                    fresh = created
+                } else {
+                    let path = SpawnPlace.expanding(place.path, home: NSHomeDirectory())
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                          isDirectory.boolValue else {
+                        return controlError(request, "no_folder", "There is no folder at \(path) on this Mac.")
+                    }
+                    guard let id = addLooseSession(agent: preset, in: path), let created = session(id) else {
+                        return controlError(request, "start_failed", "Couldn’t start the session.")
+                    }
+                    fresh = created
+                }
+            }
+        } else {
+            return controlError(request, "no_place",
+                "Name where it starts: --cwd [machine:]path, or --project <name>.")
+        }
+        activateInBackground(fresh.id)
+        return await deliverToFreshSession(request, fresh: fresh, payload: payload)
+    }
+
+    /// A session on another machine, in `path` there. `~` means that account's
+    /// home, which only the machine itself can say.
+    private func addRemoteSession(host: String, path: String, agent: AgentPreset) async -> Session? {
+        var resolved = path
+        if path == "~" || path.hasPrefix("~/") {
+            let route = TermiodRoute(sshAlias: host)
+            let home: String? = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        continuation.resume(returning: try Termiod.deviceHome(route: route))
+                    } catch {
+                        Log.termiod.error("""
+                        chief of staff: \(host, privacy: .public) did not say where home is: \
+                        \(error.localizedDescription, privacy: .public)
+                        """)
+                        continuation.resume(returning: nil)
+                    }
+                }
+            }
+            guard let home else { return nil }
+            resolved = SpawnPlace.expanding(path, home: home)
+        }
+        let id: Session.ID? = await withCheckedContinuation { continuation in
+            addRemoteTerminal(host: host, agent: agent, cwd: resolved, inBackground: true) { id in
+                continuation.resume(returning: id)
+            }
+        }
+        return id.flatMap { session($0) }
+    }
+
+    func companionSendToChief(sessionID: String, text: String) async -> CompanionControl {
+        guard let id = UUID(uuidString: sessionID), isChiefOfStaff(id),
+              settings.chiefOfStaffEnabled, let chief = session(id) else {
+            return .error(message: "The Chief of Staff is no longer available. Refresh the session list.",
+                          code: "not_chief")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .error(message: "There’s no text to send.", code: "no_text")
+        }
+        guard chiefOfStaff.agentReady, processEnd(for: chief) == nil else {
+            return .error(message: "Open the Chief of Staff to finish startup. If it’s ready, send one message there.",
+                          code: "not_ready")
+        }
+        guard !chiefOfStaff.delivering else {
+            return .error(message: "The Chief of Staff is receiving a message. Try again.", code: "busy")
+        }
+        guard !userTypedRecently(in: id, within: Self.userTypingWindow) else {
+            return .error(message: "You’re typing in the Chief of Staff on your Mac. Finish that message first.",
+                          code: "user_typing")
+        }
+        chiefOfStaff.delivering = true
+        defer { chiefOfStaff.delivering = false }
+        guard await refreshChiefOfStaffReadiness() else {
+            return .error(message: "Open the Chief of Staff to finish startup.", code: "not_ready")
+        }
+        let delivered = await performDelivery(text, to: chief, state: surface(for: chief),
+            canDeliver: {
+                guard await self.refreshChiefOfStaffReadiness() else { return false }
+                return self.settings.chiefOfStaffEnabled && self.isChiefOfStaff(id)
+                    && self.chiefOfStaff.agentReady && self.processEnd(for: chief) == nil
+                    && !self.userTypedRecently(in: id, within: Self.userTypingWindow)
+            }, onDelivery: {
+                self.noteChiefOfStaffUserInput()
+            })
+        guard delivered else {
+            return .error(message: "The Chief of Staff couldn’t receive the message. Open it on your Mac.",
+                          code: "not_live")
+        }
+        lastUserInputAt[id] = Date()
+        return .sent(sessionID: id.uuidString)
+    }
+
     /// Types `payload` into an existing sibling's surface and builds the reply.
     /// Without `--wait` the reply is the send acknowledgement (the transcript path
     /// + a cursor to read the response from); with it, the call blocks until the
@@ -443,8 +839,11 @@ extension TermioStore {
         } else {
             cursorAtSend = nil
         }
+        // Answering an agent's startup question starts it, so the wait is the
+        // launch's: its boot is not the reply.
         return await waitForReply(request, session: session,
-                                  cursorAtSend: cursorAtSend, created: false)
+                                  cursorAtSend: cursorAtSend, created: false,
+                                  launching: isStartingUp(session.id))
     }
 
     /// Types `payload` into a session's live surface and submits it. Shared by
@@ -454,9 +853,10 @@ extension TermioStore {
     /// `keys` are the `--key` presses, fired after the text in the order named;
     /// naming any of them also turns `submit` off, so nothing is pressed that the
     /// caller did not ask for.
-    private func performDelivery(
+    func performDelivery(
         _ payload: String, keys: [SessionKeyPress] = [], to session: Session,
-        state: TerminalViewState, submit: Bool = true
+        state: TerminalViewState, submit: Bool = true,
+        canDeliver: () async -> Bool = { true }, onDelivery: () -> Void = {}
     ) async -> Bool {
         // The libghostty surface attaches lazily on the pane's first render, so a
         // session never shown in the UI has no surface yet. A background mount adds
@@ -472,7 +872,9 @@ extension TermioStore {
         while state.surface == nil, Date() < attachDeadline {
             try? await Task.sleep(for: .milliseconds(150))
         }
-        guard let surfaceHandle = Self.rawSurface(from: state) else { return false }
+        guard await canDeliver(), let surfaceHandle = Self.rawSurface(from: state) else { return false }
+        onDelivery()
+        noteInputBeforeStart(session.id)
 
         // Write the payload as raw PTY bytes, then submit with a real Return *key
         // event* — `pressReturn` leaves the encoding to Ghostty, which emits what
@@ -495,6 +897,7 @@ extension TermioStore {
             return true
         }
         try? await Task.sleep(for: .milliseconds(40))
+        guard await canDeliver(), Self.rawSurface(from: state) == surfaceHandle else { return false }
         Self.pressReturn(on: surfaceHandle)
         // Whatever went wrong with the spawn prompt, someone has since driven
         // this session by hand; the warning has served its purpose.
@@ -598,12 +1001,20 @@ extension TermioStore {
     ///   at or under the window keeps the plain timeout reply instead.
     /// - **Occupant gone**: the wait is pinned to the session and agent it started
     ///   on. The session closing mid-wait is `session_closed`; its agent exiting
-    ///   back to a plain shell is `agent_gone`. (A plain-terminal target is exempt
-    ///   from the pin — a sent command line may legitimately start an agent in the
-    ///   pane, which is progress, not replacement.)
+    ///   back to a plain shell, or its process ending outright, is `agent_gone`.
+    ///   (A plain-terminal target is exempt from the agent pin — a sent command
+    ///   line may legitimately start an agent in the pane, which is progress, not
+    ///   replacement.)
+    ///
+    /// `launching` is a wait on an agent that took its prompt on its command line
+    /// (`launchPrompts`). Nothing was typed, so there is no stall to detect, and
+    /// its boot is not its turn: until the agent shows it started
+    /// (`launchesAwaitingStart`), neither a boot animation the screen streak reads
+    /// as `working` nor the paint of the boot screen counts. One held by a startup
+    /// question comes back as `needs-you`, from `watchLaunchedPrompt`.
     private func waitForReply(
         _ request: ControlRequest, session: Session,
-        cursorAtSend: Int?, created: Bool
+        cursorAtSend: Int?, created: Bool, launching: Bool = false
     ) async -> Data {
         let cap = min(max(request.timeoutMs ?? 300_000, 1_000), 600_000)
         let started = Date()
@@ -644,9 +1055,16 @@ extension TermioStore {
                     "\(sessionLink(for: session)) was closed while waiting on it.")
             }
             let occupant = effectiveAgent(for: live)
-            if occupantAtSend != .terminal, occupant.id != occupantAtSend.id {
-                var message = "The \(occupantAtSend.displayName) agent in "
-                    + "\(sessionLink(for: session)) exited mid-wait; no reply is coming."
+            // The process ending outright — an agent that quit at a startup
+            // question, or crashed — leaves the row on screen, so the occupant
+            // still reads as the agent and only the exit tells.
+            let ended = processEnd(for: live)
+            if ended != nil || (occupantAtSend != .terminal && occupant.id != occupantAtSend.id) {
+                let who = occupantAtSend == .terminal
+                    ? "The shell" : "The \(occupantAtSend.displayName) agent"
+                var message = "\(who) in \(sessionLink(for: session)) exited mid-wait"
+                if let ended { message += " (\(ended))" }
+                message += "; no reply is coming."
                 if let transcript = transcriptPaths[session.id] {
                     message += " Its transcript (\(transcript)) holds whatever it did first."
                 }
@@ -654,10 +1072,11 @@ extension TermioStore {
             }
 
             let current = status(for: session.id)
-            if current == .working {
+            let hasStarted = !launching || !isStartingUp(session.id)
+            if current == .working, hasStarted {
                 sawWorking = true
                 restingSince = nil
-            } else if restingSince == nil {
+            } else if current != .working, restingSince == nil {
                 restingSince = Date()
             }
 
@@ -679,7 +1098,7 @@ extension TermioStore {
                 break
             }
 
-            if statusAtSend != .working, !sawWorking, !changedSinceSend,
+            if !launching, statusAtSend != .working, !sawWorking, !changedSinceSend,
                current == statusAtSend,
                Double(cap) / 1_000 > stallWindow,
                now.timeIntervalSince(started) >= stallWindow {
@@ -698,8 +1117,9 @@ extension TermioStore {
             // fool this — it doesn't touch status.)
             if sawWorking, rested { settled = current; break }
             // No status signal at all: the screen changed, then stilled — for the
-            // window the occupant earns (see `agentSettleWindow`).
-            if !sawWorking, changedSinceSend, screenQuiet { settled = current; break }
+            // window the occupant earns (see `agentSettleWindow`). Never for a
+            // launch, whose screen changing is its boot.
+            if !launching, !sawWorking, changedSinceSend, screenQuiet { settled = current; break }
         }
         return await waitReply(request, session: session,
                                cursorAtSend: cursorAtSend, created: created, settled: settled)
@@ -791,12 +1211,24 @@ extension TermioStore {
     /// and a focus-free peek at any agent's live TUI. Viewport only (what a glance
     /// at the pane would show); scrollback needs a terminal-core buffer API this
     /// build doesn't have. `--lines` keeps just the tail.
-    private func readScreen(_ request: ControlRequest, in scope: ControlScope) -> Data {
+    private func readScreen(_ request: ControlRequest, in scope: ControlScope) async -> Data {
         switch resolveTarget(request.target, in: scope) {
         case .found(let session):
-            guard var lines = screenLines(for: session.id) else {
-                return controlError(request, "not_live",
-                    "\(displayTitle(for: session)) has no live terminal yet — open it once in Termio.")
+            // The Chief of Staff reads sessions nobody has opened, so it mounts
+            // one in the background the way `send` already does, instead of
+            // answering "open it once in Termio" to someone on their phone.
+            if scope.isFleet, surfaces[session.id]?.surface == nil {
+                _ = surface(for: session)
+                activateInBackground(session.id)
+            }
+            // A surface exists before SSH and the attach snapshot arrive. Its
+            // empty buffer is not evidence that the remote screen is blank.
+            guard var lines = await Self.waitForControlScreen(sample: {
+                guard self.termiodLinks[session.id]?.hasReceivedScreenOutput == true else { return nil }
+                return self.screenLines(for: session.id)
+            }) else {
+                return controlError(request, "screen_pending",
+                    "\(displayTitle(for: session))’s screen has not arrived yet. Try reading it again.")
             }
             if let cap = request.lines, cap > 0 { lines = Array(lines.suffix(cap)) }
             let screen = lines.joined(separator: "\n")
@@ -812,8 +1244,21 @@ extension TermioStore {
         }
     }
 
+    static func waitForControlScreen(timeout: TimeInterval = 3,
+                                     sample: () -> [String]?) async -> [String]? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let lines = sample() { return lines }
+            do { try await Task.sleep(for: .milliseconds(50)) }
+            catch { return nil }
+        } while Date() < deadline
+        return nil
+    }
+
     /// Waits for a freshly launched agent TUI to finish booting before keystrokes
     /// are typed into it — text sent into a half-drawn banner is simply eaten.
+    /// Only for an agent that can't take its prompt on its command line
+    /// (`AgentDefinition.promptArgument`); one that can is never typed into.
     /// There is no boot hook to wait on (Claude's `SessionStart` hook only fires
     /// on `clear`), so readiness is read off the screen itself: two consecutive
     /// identical non-empty viewport frames mean the boot paint has settled. Capped
@@ -1032,6 +1477,10 @@ extension TermioStore {
     /// directory or one of its session worktrees (the fallback for a plain shell).
     private func callerScope(session id: String?, cwd: String?) -> ControlScope? {
         if let id, let uuid = UUID(uuidString: id), let home = locate(uuid) {
+            // Scope follows identity, never a flag: the one session with the
+            // Chief of Staff's role sees the fleet, and nothing another caller
+            // can pass widens its own (docs/design/20261019-chief-of-staff.md §7.4).
+            if self[home].role == .chief { return fleetScope() }
             return scope(at: home)
         }
         guard let cwd else { return nil }
@@ -1058,7 +1507,9 @@ extension TermioStore {
         return scope(at: .chats(workspace: index, session: 0))
     }
 
-    /// The roster one slot belongs to, named the way `list` prints it.
+    /// The roster one slot belongs to, named the way `list` prints it. The Chief
+    /// of Staff is in no one's roster: it is filed among its workspace's chats,
+    /// but only you and Termio talk to it.
     private func scope(at home: SessionSlot) -> ControlScope {
         switch home {
         case .project(let index, _):
@@ -1068,12 +1519,26 @@ extension TermioStore {
         case .terminals(let index, _):
             let workspace = workspaces[index]
             return ControlScope(id: workspace.id, name: "\(workspace.name) — Terminals",
-                                sessions: workspace.terminals, project: nil)
+                                sessions: workspace.terminals.filter { $0.role != .chief }, project: nil)
         case .chats(let index, _):
             let workspace = workspaces[index]
             return ControlScope(id: workspace.id, name: "\(workspace.name) — Chats",
-                                sessions: workspace.chats, project: nil)
+                                sessions: workspace.chats.filter { $0.role != .chief }, project: nil)
         }
+    }
+
+    /// The `watch` key every fleet subscriber shares. Fixed, because it only has
+    /// to differ from every project and workspace id, which are random.
+    nonisolated static let fleetScopeID = UUID(uuid: (
+        0xC5, 0x1E, 0xF0, 0xF5, 0x7A, 0xFF, 0x40, 0x00,
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01))
+
+    /// Every session in every workspace on every connected machine, minus the
+    /// Chief of Staff itself.
+    private func fleetScope() -> ControlScope {
+        ControlScope(id: Self.fleetScopeID, name: "All sessions",
+                     sessions: allSessions.filter { $0.role != .chief }, project: nil,
+                     isFleet: true)
     }
 
     /// What one `termio sessions` call can see: the caller's own roster.
@@ -1091,6 +1556,9 @@ extension TermioStore {
         /// The folder a spawned sibling opens in. `nil` for a loose caller: a
         /// scratch session has no project to open another one in.
         let project: Project?
+        /// The Chief of Staff's scope: every session, guarded by where its turn
+        /// came from (`ChiefOfStaffGuard`).
+        var isFleet = false
     }
 
     private enum TargetResolution {

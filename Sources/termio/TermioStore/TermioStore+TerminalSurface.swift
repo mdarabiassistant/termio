@@ -229,7 +229,13 @@ extension TermioStore {
             (command: Self.sshLaunchCommand(host: $0, keyToInstall: session.sshKeyToInstall),
              resumeID: String?.none)
         } ?? resolveLaunch(for: session, spawnPath: spawnPath)
-        let agentCommand = launch.command
+        // A spawn's prompt rides this first launch on the agent's own command line,
+        // where nothing the agent asks at startup can swallow it (`launchPrompts`).
+        // Taken here, so no later launch of the session replays it.
+        let prompt = chiefOfStaffLaunchPrompt(for: session)
+            ?? launchPrompts.removeValue(forKey: session.id)
+        let agentCommand = Self.launchCommand(
+            launch.command, prompt: prompt, argument: session.agent.promptArgument)
 
         // Pi checks the pinned `--session-id` against its session store at startup
         // and warns when no file exists yet; pre-creating it keeps the launch silent.
@@ -262,6 +268,14 @@ extension TermioStore {
         // Stamp the session id so any agent hook running inside can echo it back,
         // letting `termio agent report` name this exact session.
         env["TERMIO_SESSION"] = session.id.uuidString
+        // The Chief of Staff's only tools are this channel's CLI, so it must find
+        // it whether or not the user ever linked it onto PATH. The support copy
+        // is always there; the login shell keeps an inherited entry when its
+        // profile rebuilds PATH.
+        if session.role == .chief {
+            let bin = CommandLineTool.supportCopyURL.deletingLastPathComponent().path
+            env["PATH"] = bin + (env["PATH"].map { ":" + $0 } ?? "")
+        }
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["TERM_PROGRAM"] = "termio"
@@ -456,9 +470,18 @@ extension TermioStore {
 
     /// POSIX single-quote escaping: wraps `value` in `'…'`, splicing any embedded
     /// quote as `'\''`, so the result is one literal argument no matter what it
-    /// contains. Used to make a user-supplied SSH host safe inside `exec ssh …`.
+    /// contains. Used to make a user-supplied SSH host safe inside `exec ssh …`, and
+    /// a spawn's prompt safe on an agent's command line.
     static func shellQuoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// `command` with `prompt` placed by the agent's `promptArgument` pattern, its
+    /// `{prompt}` becoming the prompt as one shell-quoted word. Unchanged when any
+    /// of the three is missing.
+    static func launchCommand(_ command: String?, prompt: String?, argument: String?) -> String? {
+        guard let command, let prompt, let argument else { return command }
+        return command + " " + argument.replacingOccurrences(of: "{prompt}", with: shellQuoted(prompt))
     }
 
     /// The user's real login shell, read from the password database rather than the
@@ -485,9 +508,10 @@ extension TermioStore {
         // one is the "settings silently mean this Mac" bug at its most expensive —
         // the agent dies at 0 ms with "not found".
         let device = KnownDevice.running(session) ?? .thisMac
-        guard let base = settings.command(for: session.agent, on: device) else {
+        guard let configured = settings.command(for: session.agent, on: device) else {
             return (nil, nil) // plain login shell — nothing to resume
         }
+        let base = chiefOfStaffLaunchCommand(configured, for: session)
         // Every resume signal below reads *this Mac's* disk — the agent's
         // session store, the pinned-conversation probe — and a session on
         // another machine keeps its conversations over there, where none of it

@@ -72,8 +72,9 @@ extension Termiod {
             /// cursor its own listing was stamped at (`fs_listed.seq`) and
             /// re-reads when that listing is the older of the two.
             ///
-            /// Later re-subscribes say `reset` instead: those have a `since` to
-            /// replay from, and their failure to use it is what `gap` reports.
+            /// Later file re-subscribes say `reset` instead. Status watches
+            /// also report their new baseline after a gap, so a daemon restart
+            /// can discard cursors from its previous incarnation.
             case established(at: UInt64)
         }
 
@@ -93,6 +94,7 @@ extension Termiod {
         private let caps: [String]
         private let resource: String
         private let onUpdate: @Sendable (Update) -> Void
+        private let onStatus: (@Sendable (StatusChangedPayload) -> Void)?
         private let queue: DispatchQueue
         private let pin: ControlPool.ChannelPin
 
@@ -109,7 +111,18 @@ extension Termiod {
         /// itself: the tree stays wrong and nothing later says so. The ledger is
         /// the same one the `git:` plane holds for the same reason
         /// (`DeviceWatchLedger`).
-        private var ledger = DeviceWatchLedger<FsChangedPayload>()
+        private enum Batch: Sendable {
+            case files(FsChangedPayload)
+            case status(StatusChangedPayload)
+
+            var seq: UInt64 {
+                switch self {
+                case .files(let value): value.seq
+                case .status(let value): value.seq
+                }
+            }
+        }
+        private var ledger = DeviceWatchLedger<Batch>()
         /// The live subscription, or nil between attempts. Holding it is the
         /// interest: releasing it is what retires the watch on the device, and
         /// it is released with the last subscriber to that resource on this
@@ -119,6 +132,7 @@ extension Termiod {
         /// the first subscribe answers, which is what makes that first one ask
         /// for the cursor rather than a replay.
         private var cursor: UInt64?
+        private var statusCursor = ResourceCursor()
         private var failures = 0
         private var stopped = false
         /// Whether a subscribe has ever landed, so `established` fires once.
@@ -147,6 +161,7 @@ extension Termiod {
         /// arbitrary queue and must hop wherever it needs to be.
         convenience init(
             route: TermiodRoute, caps: [String], resource: String,
+            onStatus: (@Sendable (StatusChangedPayload) -> Void)? = nil,
             onUpdate: @escaping @Sendable (Update) -> Void
         ) {
             self.init(
@@ -157,12 +172,13 @@ extension Termiod {
                         requiring: [Self.capability],
                         onEvent: onEvent, onInterrupted: onInterrupted)
                 },
-                onUpdate: onUpdate)
+                onStatus: onStatus, onUpdate: onUpdate)
         }
 
         init(
             route: TermiodRoute, caps: [String], resource: String,
             subscribing: @escaping Subscribing,
+            onStatus: (@Sendable (StatusChangedPayload) -> Void)? = nil,
             onUpdate: @escaping @Sendable (Update) -> Void
         ) {
             self.route = route
@@ -170,6 +186,7 @@ extension Termiod {
             self.resource = resource
             self.subscribing = subscribing
             self.onUpdate = onUpdate
+            self.onStatus = onStatus
             self.queue = DispatchQueue(
                 label: "sh.termio.termiod.watch", qos: .utility)
             self.pin = ControlPool.pin(route: route, caps: caps)
@@ -241,8 +258,15 @@ extension Termiod {
         /// subscription it would be interpreted against is not installed yet,
         /// and comes back out of `settle` once it is.
         private func receive(_ payload: Data, generation: Int) {
-            guard let batch = try? decodeFsChanged(payload) else { return }
-            let ready: FsChangedPayload? = lock.withLock {
+            let batch: Batch
+            switch try? decodeEvent(payload) {
+            case .fsChanged(let value) where resource.hasPrefix("fs:"):
+                batch = .files(value)
+            case .statusChanged(let value) where resource == statusResource && value.resource == resource:
+                batch = .status(value)
+            default: return
+            }
+            let ready: Batch? = lock.withLock {
                 guard !stopped else { return nil }
                 return ledger.admit(batch, generation: generation)
             }
@@ -258,9 +282,14 @@ extension Termiod {
         /// The cursor moves here rather than on arrival: a batch that was held
         /// and then abandoned with its attempt must not have advanced it, or the
         /// replacement subscription resumes past a change nobody applied.
-        private func deliver(_ batch: FsChangedPayload) {
+        private func deliver(_ batch: Batch) {
             let fresh: Bool = lock.withLock {
                 guard !stopped else { return false }
+                if case .status = batch {
+                    let verdict = statusCursor.admit(seq: batch.seq)
+                    cursor = statusCursor.resumeFrom
+                    return verdict != .drop
+                }
                 if let cursor, batch.seq <= cursor { return false }
                 // Contiguous only, for the reason `GitPanelModel.apply` states:
                 // a batch past the next one means batches are missing, and each
@@ -272,7 +301,10 @@ extension Termiod {
                 return true
             }
             guard fresh else { return }
-            onUpdate(.batch(batch))
+            switch batch {
+            case .files(let value): onUpdate(.batch(value))
+            case .status(let value): onStatus?(value)
+            }
         }
 
         /// The channel underneath died. The device keeps the resource and its
@@ -300,6 +332,7 @@ extension Termiod {
             // reconnect.
             guard subscription == nil else { lock.unlock(); return }
             let generation = ledger.begin()
+            statusCursor.beginAttempt()
             let since = cursor
             lock.unlock()
 
@@ -318,6 +351,13 @@ extension Termiod {
                 let first: Bool? = lock.withLock {
                     guard !stopped, ledger.settle(generation: generation) else { return nil }
                     self.subscription = subscription
+                    // A status watch has no cursor-bearing fs listing. The ack
+                    // is its baseline; a roster refresh repairs a replay gap.
+                    if resource == statusResource, !hasEstablished || gap {
+                        statusCursor.reset()
+                        statusCursor.adoptBaseline(cursor)
+                        self.cursor = cursor
+                    }
                     failures = 0
                     defer { hasEstablished = true }
                     return !hasEstablished
@@ -334,7 +374,7 @@ extension Termiod {
                 // with two full listings instead of one. What the caller does
                 // need is the cursor the watch starts at, so a listing taken
                 // before it can be reconsidered.
-                if first {
+                if first || (resource == statusResource && gap) {
                     onUpdate(.established(at: cursor))
                 } else if gap {
                     onUpdate(.reset)

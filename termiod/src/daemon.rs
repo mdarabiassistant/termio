@@ -67,6 +67,9 @@ pub struct Manager {
     /// rationed is the blocking pool, and every connection draws on the same
     /// one.
     searching: Arc<tokio::sync::Semaphore>,
+    /// Which machine has the Chief of Staff on, as this device was last told
+    /// (`chief.rs`).
+    chief: Arc<crate::chief::ChiefRecord>,
 }
 
 /// How many `fs.search` walks may run at once.
@@ -92,6 +95,7 @@ impl Manager {
         host_id: String,
         graveyard: Arc<Graveyard>,
         handoff: mpsc::UnboundedSender<std::path::PathBuf>,
+        chief: Arc<crate::chief::ChiefRecord>,
     ) -> Manager {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         Manager {
@@ -111,6 +115,7 @@ impl Manager {
             session_removed: Arc::new(Notify::new()),
             handoff,
             searching: Arc::new(tokio::sync::Semaphore::new(search_permits())),
+            chief,
         }
     }
 
@@ -190,6 +195,7 @@ impl Manager {
             spec.rows,
             spec.cols,
             spec.workstream,
+            spec.role,
             self.on_exit.clone(),
             self.events.clone(),
         )
@@ -836,7 +842,14 @@ pub async fn serve(
     );
     let (on_exit_tx, mut on_exit_rx) = mpsc::unbounded_channel::<SessionEnded>();
     let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
-    let manager = Manager::new(on_exit_tx, host_id, graveyard, handoff_tx);
+    // Beside `host.id`, for the same reason: the claim describes this host,
+    // so it outlives any one daemon process.
+    let chief = Arc::new(
+        paths::durable_state_dir()
+            .map(|dir| crate::chief::ChiefRecord::open(&dir))
+            .unwrap_or_else(|_| crate::chief::ChiefRecord::detached()),
+    );
+    let manager = Manager::new(on_exit_tx, host_id, graveyard, handoff_tx, chief);
     tokio::spawn(pump_status_resource(
         manager.events.subscribe(),
         manager.resources.clone(),
@@ -2348,6 +2361,53 @@ async fn process_control(
                 });
             }
         }
+        Control::GetChief { seq } => {
+            let response = if !connection.capabilities.contains("chief_of_staff") {
+                error(
+                    seq,
+                    ErrorCode::Denied,
+                    "the chief_of_staff capability was not negotiated",
+                    false,
+                )
+            } else {
+                Control::Chief {
+                    claim: manager.chief.current(),
+                    refused: false,
+                    re: seq,
+                }
+            };
+            send_response(out, response_cache, seq, response);
+        }
+        Control::SetChief {
+            claim,
+            holder,
+            takeover,
+            seq,
+        } => {
+            let response = if !connection.capabilities.contains("chief_of_staff") {
+                error(
+                    seq,
+                    ErrorCode::Denied,
+                    "the chief_of_staff capability was not negotiated",
+                    false,
+                )
+            } else {
+                match manager.chief.apply(claim, &holder, takeover) {
+                    Ok((claim, refused)) => Control::Chief {
+                        claim,
+                        refused,
+                        re: seq,
+                    },
+                    Err(failure) => error(
+                        seq,
+                        ErrorCode::Internal,
+                        format!("recording the chief of staff claim: {failure:#}"),
+                        false,
+                    ),
+                }
+            };
+            send_response(out, response_cache, seq, response);
+        }
         Control::SetName {
             id,
             custom_name,
@@ -2393,6 +2453,7 @@ async fn process_control(
         Control::SetStatus {
             id,
             status,
+            agent_processes,
             title,
             transcript_path,
             conversation_id,
@@ -2401,6 +2462,10 @@ async fn process_control(
             seq,
         } => {
             let details = crate::protocol::StatusDetails {
+                agent_processes: tokio::task::spawn_blocking(move || {
+                    agent_processes.into_iter().take(32)
+                        .filter(crate::proc::AgentProcess::is_current).collect::<Vec<_>>()
+                }).await.unwrap_or_default(),
                 transcript_path,
                 conversation_id,
                 tool,
@@ -2543,6 +2608,7 @@ async fn process_control(
         | Control::Created { .. }
         | Control::Sessions { .. }
         | Control::NameSet { .. }
+        | Control::Chief { .. }
         | Control::Attached { .. }
         | Control::Exited { .. }
         | Control::WaitResult { .. }

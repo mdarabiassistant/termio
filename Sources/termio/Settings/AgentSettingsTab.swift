@@ -139,6 +139,8 @@ struct AgentSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            ChiefOfStaffSection(settings: settings, store: store)
+
             Section {
                 Toggle(isOn: $settings.notifyOnTaskCompletion) {
                     SettingsLabel(
@@ -377,6 +379,166 @@ struct AgentSettingsTab: View {
             preset.id, by: offset, in: listedAgents.map(\.id))
         else { return }
         settings.setEnabledOrder(moved)
+    }
+}
+
+/// The Chief of Staff's switch, its agent, its briefs, and its instructions
+/// (docs/design/20261019-chief-of-staff.md §4.1). The switch goes through the
+/// store rather than straight to the setting: turning it on first asks the
+/// other machines whether one of them already runs it.
+private struct ChiefOfStaffSection: View {
+    @ObservedObject var settings: AppSettings
+    @ObservedObject var store: TermioStore
+    @State private var workingDirectory = ""
+    @State private var dataDirectory = ""
+
+    private var foldersChanged: Bool {
+        workingDirectory != settings.chiefOfStaffWorkingDirectory
+            || dataDirectory != settings.chiefOfStaffDataDirectory
+    }
+
+    private var agents: [AgentPreset] {
+        enabledAgentPresets(settings).filter { !$0.isShell }
+    }
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { settings.chiefOfStaffEnabled },
+                set: { enabled in
+                    guard !enabled || !foldersChanged || saveFolders() else { return }
+                    store.setChiefOfStaffEnabled(enabled)
+                })
+            ) {
+                SettingsLabel(
+                    title: localized("Chief of Staff"),
+                    subtext: localized("Runs one agent that can see and drive every session on your machines. Talk to it in its pane at the top of the sidebar, or from your phone."),
+                    titleFont: .headline
+                )
+            }
+            .toggleStyle(.switch)
+            folderRow(
+                title: localized("Working Folder"),
+                detail: localized("Starts the Chief of Staff here so it can read your projects."),
+                value: $workingDirectory)
+            folderRow(
+                title: localized("Data Folder"),
+                detail: localized("Stores its instructions, notes, and intermediate files."),
+                value: $dataDirectory)
+            if foldersChanged {
+                HStack {
+                    Text(localized("Existing files stay in their current folder."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(settings.chiefOfStaffEnabled
+                           ? localized("Save and Restart") : localized("Save Folders")) {
+                        _ = saveFolders()
+                    }
+                }
+            }
+            if let error = store.chiefOfStaffSetupError {
+                Text(error).foregroundStyle(.red).font(.caption)
+            }
+            if let conflict = store.chiefOfStaffConflict {
+                HStack(alignment: .firstTextBaseline) {
+                    SettingsLabel(
+                        title: localized("The Chief of Staff is on \(conflict.machineName)."),
+                        subtext: localized("If that machine is gone for good, turn it on here instead.")
+                    )
+                    Spacer()
+                    Button(localized("Turn On Here Instead")) {
+                        guard !foldersChanged || saveFolders() else { return }
+                        store.setChiefOfStaffEnabled(true, takeover: true)
+                    }
+                }
+            }
+            if settings.chiefOfStaffEnabled {
+                Picker(localized("Agent"), selection: Binding(
+                    get: { store.chiefOfStaffAgent()?.id ?? "" },
+                    set: { settings.chiefOfStaffAgentID = $0 })
+                ) {
+                    ForEach(agents) { preset in
+                        Text(preset.displayName).tag(preset.id)
+                    }
+                }
+                Toggle(isOn: $settings.chiefOfStaffBriefsEnabled) {
+                    SettingsLabel(
+                        title: localized("Brief me when sessions need me"),
+                        subtext: localized("Questions, finished turns, and stalls from every session go to the Chief of Staff, which decides what to tell you.")
+                    )
+                }
+                .toggleStyle(.switch)
+                Button(localized("Edit Instructions…")) { openInstructions() }
+            }
+        } header: {
+            SectionHeaderLabel(title: localized("Chief of Staff"))
+        } footer: {
+            Text(localized("One machine at a time: turning it on is refused while another machine Termio can reach has it on."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .onAppear {
+            workingDirectory = settings.chiefOfStaffWorkingDirectory
+            dataDirectory = settings.chiefOfStaffDataDirectory
+        }
+    }
+
+    private func saveFolders() -> Bool {
+        do {
+            try store.saveChiefOfStaffDirectories(working: workingDirectory, data: dataDirectory)
+            workingDirectory = settings.chiefOfStaffWorkingDirectory
+            dataDirectory = settings.chiefOfStaffDataDirectory
+            return true
+        } catch {
+            store.chiefOfStaffSetupError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func folderRow(title: String, detail: String, value: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SettingsLabel(title: title, subtext: detail)
+            HStack {
+                TextField((ChiefOfStaffSetup.folder.path as NSString).abbreviatingWithTildeInPath, text: value)
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                    .accessibilityLabel(title)
+                Button(localized("Choose…")) {
+                    DispatchQueue.main.async {
+                        let panel = NSOpenPanel()
+                        panel.title = title
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.canCreateDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.showsHiddenFiles = true
+                        let current = value.wrappedValue.isEmpty ? ChiefOfStaffSetup.folder.path : value.wrappedValue
+                        panel.directoryURL = URL(fileURLWithPath: (current as NSString).expandingTildeInPath)
+                        if panel.runModal() == .OK, let folder = panel.url {
+                            value.wrappedValue = (folder.path as NSString).abbreviatingWithTildeInPath
+                        }
+                    }
+                }
+                .accessibilityLabel(title + ": " + localized("Choose…"))
+            }
+        }
+    }
+
+    /// The charter file the running agent reads: `CLAUDE.md` for Claude Code,
+    /// `AGENTS.md` for the rest. Opened in the user's own editor; text outside
+    /// Termio's block is theirs and survives upgrades.
+    private func openInstructions() {
+        let name = store.chiefOfStaffAgent() == .claudeCode ? "CLAUDE.md" : "AGENTS.md"
+        do {
+            let directories = try store.chiefOfStaffDirectories()
+            let folder = try ChiefOfStaffSetup.seed(cli: CommandLineTool.toolName, directory: directories.data)
+            if !NSWorkspace.shared.open(folder.appendingPathComponent(name)) {
+                store.chiefOfStaffSetupError = localized("Couldn’t open the instructions file.")
+            }
+        } catch {
+            store.chiefOfStaffSetupError = error.localizedDescription
+            Log.app.error("chief of staff: opening its instructions failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 

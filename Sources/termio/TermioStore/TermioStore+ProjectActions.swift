@@ -799,6 +799,21 @@ extension TermioStore {
         selectedSessionID = session.id
     }
 
+    /// A loose session on this Mac that starts in `folder` — the Chief of
+    /// Staff's `spawn --cwd`. Filed among the workspace's Terminals, where a
+    /// terminal you open by hand and start an agent in lands, and it leaves the
+    /// selection alone: whoever asked for it may be on their phone.
+    func addLooseSession(agent: AgentPreset, in folder: String) -> Session.ID? {
+        let home = workspaceForThisMac
+        guard let index = workspaces.firstIndex(where: { $0.id == home.id }) else { return nil }
+        let count = workspaces[index].terminals.filter { $0.agent == .terminal }.count
+        var session = Session(
+            title: agent == .terminal ? "Terminal \(count + 1)" : agent.displayName, agent: agent)
+        session.spawnDirectory = folder
+        workspaces[index].terminals.append(session)
+        return session.id
+    }
+
     /// Opens an **SSH terminal** to `host` — a terminal that launches `ssh <host>`
     /// in a local PTY instead of a local shell (see `Session.sshHost`). It lands
     /// where the user is (see `sshShellWorkspace`). `host` is a `~/.ssh/config`
@@ -1388,6 +1403,8 @@ extension TermioStore {
         // stops offering a scope with nothing in it. A workspace the user made
         // stays — they made it on purpose.
         pruneEmptyDeviceWorkspaces()
+        lastUserInputAt[id] = nil
+        if session.role == .chief { chiefOfStaffSessionClosed() }
     }
 
     /// Drops any workspace Termio made itself that is left holding nothing, except

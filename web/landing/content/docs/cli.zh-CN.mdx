@@ -3,8 +3,8 @@ title: 命令行工具
 description: termio 命令——从 shell 打开项目，以及让你或另一个 Agent 派生、驱动、监督会话的 termio sessions 编排 API。
 x-i18n:
   source_path: cli.mdx
-  source_hash: 594a99d427b865712f7cb6faa8cd459e040b54d0ba11b7e09db266c61f376f70
-  generated_at: 2026-09-17
+  source_hash: 7fab8373fd254dd8b9d4874d1199ea9d810364eec4a2d1a66f3e9f820b20cc15
+  generated_at: 2026-10-20
 ---
 
 `termio` 是这个应用在 shell 一侧的入口：它打开项目，而通过 `termio sessions`，它就是
@@ -73,8 +73,10 @@ termio ~/code/myapp    # 打开指定文件夹
 
 ## 派生而不等待
 
-`spawn` 在会话存在的那一刻就返回：回复里带着新会话的链接，而提示本身会在 Agent 启动完成后
-输入进去。加 `--agent <id>`（例如 `codex`、`grok`、`pi`）来选择 Agent；默认与调用方同类。
+`spawn` 在会话存在的那一刻就返回：回复里带着新会话的链接。能在命令行上接收首条提示的 Agent
+（Claude Code、Codex）会从命令行拿到它，因此可以先问完自己启动时的问题（例如是否信任这个
+文件夹）再开始；20 秒后仍在提问的会显示为 `needs-you`。其他 Agent 则在启动完成后由 Termio
+把提示输入进去。加 `--agent <id>`（例如 `codex`、`grok`、`pi`）来选择 Agent；默认与调用方同类。
 
 ## 运行普通命令
 
@@ -111,7 +113,7 @@ termio sessions spawn "summarize the failing CI job" --wait --timeout 120000
 
 - 提示在 5 秒内毫无反应——状态没动、屏幕没变——会以 `prompt_stalled` 报错：输入被吞了
   （Agent 还在启动，或者程序忽略输入的文本），不会有任何一轮到来。
-- 等待中途关闭的会话报 `session_closed`；等待中途退回 shell 的 Agent 报 `agent_gone`。
+- 等待中途关闭的会话报 `session_closed`；等待中途退出的 Agent——退回 shell 或整个进程结束——报 `agent_gone`。
 
 超时时回复依然会返回（`timed_out: true`），带上当前的状态；会话继续运行。退出码把三种结果
 分开，脚本无需解析即可分支：**0** 已落定，**1** 出错（含卡住/消失），**3** 超时。

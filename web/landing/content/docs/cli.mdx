@@ -83,10 +83,12 @@ focused help for any one verb.
 ## Spawning without waiting
 
 `spawn` returns the moment the session exists: the reply carries the new
-session’s link, and the prompt itself is typed in once the agent finishes
-booting. Add
-`--agent <id>` (e.g. `codex`, `grok`, `pi`) to choose the agent; it defaults to
-the caller’s own kind.
+session’s link. An agent that takes a starting prompt on its command line
+(Claude Code, Codex) gets it there, so it can ask its own startup questions,
+such as whether to trust the folder, before it starts; one still asking after 20
+seconds shows as `needs-you`. Any other agent has the prompt typed in once it
+finishes booting. Add `--agent <id>` (e.g. `codex`, `grok`, `pi`) to choose the
+agent; it defaults to the caller’s own kind.
 
 ## Running plain commands
 
@@ -131,7 +133,7 @@ come:
   change — errors as `prompt_stalled`: the input was eaten (an agent still
   booting, a program that ignores typed text), and no turn is coming.
 - A session that closes mid-wait errors as `session_closed`; an agent that
-  exits back to its shell mid-wait errors as `agent_gone`.
+  exits mid-wait, back to its shell or altogether, errors as `agent_gone`.
 
 On timeout the reply still comes back (`timed_out: true`) with whatever the
 current status is; the session keeps running. The exit code splits the three

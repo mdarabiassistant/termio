@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod app_socket;
 pub mod channel;
+pub mod chief;
 pub mod client;
 pub mod daemon;
 pub mod files;
