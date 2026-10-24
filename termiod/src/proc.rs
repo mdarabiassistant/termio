@@ -666,7 +666,7 @@ fn split_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
     (!arguments.is_empty()).then_some(arguments)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn string_until_nul(bytes: &[u8]) -> Option<String> {
     let end = bytes
         .iter()
