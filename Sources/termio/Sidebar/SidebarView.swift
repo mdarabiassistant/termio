@@ -45,14 +45,6 @@ private struct PinnedSessionEntry: Identifiable {
     var id: Session.ID { session.id }
 }
 
-/// One session blocked on the user in a workspace the sidebar is not showing,
-/// lifted into the working set with the name of the scope it lives in.
-private struct WaitingElsewhereEntry: Identifiable {
-    let workspaceName: String
-    let session: Session
-    var id: Session.ID { session.id }
-}
-
 /// A muted top-level *section* header — the tier above project folders. Used for the
 /// two special groupings, Terminals and Pinned: a small leading SF Symbol in the same
 /// icon column as the rows below, plus an uppercase, tracked, grey label. Collapsible
@@ -265,13 +257,6 @@ private struct WorkspaceSidebarRows: View {
         pinnedSessions += (workspace.terminals + chats)
             .filter(\.pinned)
             .map { PinnedSessionEntry(project: nil, session: $0) }
-        // Agents blocked on the user in *other* workspaces, lifted into the working
-        // set. The scope bounds the panes — terminal, files, git, issues — and never
-        // the needs-you surface: an agent waiting on an answer that the user cannot
-        // see because they are in a different workspace is the one failure this
-        // feature must not introduce. They carry their workspace's name as the
-        // breadcrumb, so the row says where clicking will take you.
-        let waitingElsewhere = elsewhereNeedingYou(currentWorkspace: workspace.id)
         // Whether any row in this column wears a machine mark. Suppressed only
         // where the band above the column already answers it: a workspace Termio
         // named after a box repeats that one fact down every row. A workspace the
@@ -281,7 +266,7 @@ private struct WorkspaceSidebarRows: View {
         let bandNamesTheMachine = workspace.isAutoCreated == true && !workspace.device.isThisMac
         let marksDevice = !bandNamesTheMachine
         let hasPinned = !pinnedProjects.isEmpty || !pinnedWorktrees.isEmpty
-            || !pinnedSessions.isEmpty || !waitingElsewhere.isEmpty
+            || !pinnedSessions.isEmpty
         let hasTerminals = !workspace.terminals.isEmpty
         let hasChats = !chats.isEmpty
         return Group {
@@ -291,7 +276,8 @@ private struct WorkspaceSidebarRows: View {
             // with its origin breadcrumb. Nested items stay in the tree below too; only
             // whole projects move up here. This curated working set sits at the very top —
             // above the ephemeral Terminals/Chats sections — because it's the items the user
-            // deliberately elevated (mirroring the iOS "Needs You" strip at the home top).
+            // deliberately elevated. Sessions needing attention already appear under
+            // their own machine; copying them here would make them look pinned.
             if hasPinned {
                 SidebarSectionHeader(
                     title: localized("Pinned"),
@@ -303,10 +289,6 @@ private struct WorkspaceSidebarRows: View {
                     }
                 )
                 if !pinnedCollapsed {
-                    ForEach(waitingElsewhere) { entry in
-                        SessionRow(session: entry.session, chrome: chrome, leadingIndent: 16,
-                                   breadcrumb: entry.workspaceName, marksDevice: marksDevice)
-                    }
                     ForEach(pinnedProjects) { projectBlock($0, marksDevice: marksDevice) }
                     ForEach(pinnedWorktrees) { entry in
                         pinnedWorktreeBlock(project: entry.project, worktree: entry.worktree,
@@ -399,20 +381,6 @@ private struct WorkspaceSidebarRows: View {
             // of its own automatically (`reconcileExternalSessions`) — there is
             // no second list to learn. The "Also Running" section that used to
             // sit here is gone with #528.
-        }
-    }
-
-    /// Agents blocked on the user outside the workspace on screen. Sorted by the
-    /// order they appear in the tree so the list is stable between renders.
-    private func elsewhereNeedingYou(currentWorkspace: Workspace.ID) -> [WaitingElsewhereEntry] {
-        store.workspaces.filter { $0.id != currentWorkspace }.flatMap { workspace in
-            let loose = workspace.looseSessions
-            let filed = store.projects
-                .filter { $0.workspaceID == workspace.id }
-                .flatMap(\.sessions)
-            return (loose + filed)
-                .filter { $0.role != .chief && store.status(for: $0.id) == .needsAttention }
-                .map { WaitingElsewhereEntry(workspaceName: workspace.name, session: $0) }
         }
     }
 
