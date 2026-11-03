@@ -912,6 +912,18 @@ extension TermioStore {
         deviceStatusWatches.removeAll()
     }
 
+    func refreshSessionList(
+        on device: KnownDevice,
+        fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
+            try Termiod.roster(route: $0)
+        }
+    ) {
+        let key = device.route.description
+        guard !refreshingSessionRoutes.contains(key) else { return }
+        refreshingSessionRoutes.insert(key)
+        refreshDeviceSessions(on: device, force: true, fetchingRoster: fetchingRoster)
+    }
+
     func refreshKnownDeviceSessions(
         fetchingRoster: @escaping @Sendable (TermiodRoute) throws -> Termiod.SessionsPayload = {
             try Termiod.roster(route: $0)
@@ -1003,6 +1015,8 @@ extension TermioStore {
                     if self.rosterFetches[key]?.refreshAfterReply == true {
                         self.rosterFetches[key]?.refreshAfterReply = false
                         self.refreshDeviceSessions(on: device, force: true, fetchingRoster: fetchingRoster)
+                    } else if self.refreshingSessionRoutes.contains(key) {
+                        self.refreshingSessionRoutes.remove(key)
                     }
                 }
             }

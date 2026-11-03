@@ -1118,6 +1118,9 @@ final class TermioStore: ObservableObject {
     }
 
     var rosterFetches: [String: RosterFetch] = [:]
+
+    /// Explicit requests only, so background discovery does not animate the refresh control.
+    @Published var refreshingSessionRoutes: Set<String> = []
     var localSessionDiscoveryTimer: Timer?
     var deviceStatusWatches: [String: DeviceStatusWatch] = [:]
     var sessionNameUploads: Set<Session.ID> = []
