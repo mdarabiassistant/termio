@@ -437,6 +437,84 @@ final class RemoteSessionDiscoveryTests: XCTestCase {
         XCTAssertEqual(store.sessions(inWorkspace: remote.id).map(\.id), [adopted?.id].compactMap { $0 })
     }
 
+    func testManualRefreshFindsNewRemoteSessionsDespiteARecentCachedRoster() async throws {
+        let alias = "refresh-\(UUID().uuidString)"
+        let otherAlias = "other-\(UUID().uuidString)"
+        var selected = Session(title: "Open shell", agent: .terminal)
+        selected.termiodRemoteHost = alias
+        let remote = Workspace(name: "Remote", terminals: [selected], deviceAlias: alias)
+        let other = Workspace(name: "Other", deviceAlias: otherAlias)
+        let store = makeStore(workspaces: [remote, other, Workspace(name: "Local")])
+        let key = TermiodRoute.ssh(alias).description
+        let cached = DeviceSessions(live: [], tombstones: [])
+        store.deviceSessionsRoute = key
+        store.deviceSessions = .ready(cached)
+        store.rosterFetches[key] = TermioStore.RosterFetch(settledAt: .now, answer: cached)
+        let live = try payload(name: "created-elsewhere", attached: 2)
+
+        store.refreshSessionList(on: KnownDevice(alias: alias, deviceID: nil)) { _ in live }
+        XCTAssertTrue(store.refreshingSessionRoutes.contains(key))
+        try await waitForRoster(.ssh(alias), in: store)
+
+        XCTAssertTrue(store.sessions(inWorkspace: remote.id).contains {
+            $0.termiodSessionName == "created-elsewhere"
+        })
+        XCTAssertTrue(store.sessions(inWorkspace: other.id).isEmpty)
+        XCTAssertNil(store.rosterFetches[TermiodRoute.ssh(otherAlias).description])
+        XCTAssertNil(store.rosterFetches[TermiodRoute.local.description])
+        XCTAssertEqual(store.selectedSessionID, selected.id)
+        XCTAssertEqual(store.currentWorkspaceID, remote.id)
+        XCTAssertEqual(store.currentDeviceAlias, alias)
+        XCTAssertTrue(store.refreshingSessionRoutes.isEmpty)
+    }
+
+    func testManualRefreshDuringDiscoveryWaitsForAFreshReply() async throws {
+        let alias = "busy-\(UUID().uuidString)"
+        let remote = Workspace(name: "Remote", deviceAlias: alias)
+        let store = makeStore(workspaces: [Workspace(name: "Local"), remote])
+        let live = try payload(name: "external-shell", attached: 1)
+        let empty = try payload()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal(); release.signal() }
+        let requested = expectation(description: "Both remote roster requests started")
+        requested.expectedFulfillmentCount = 2
+        store.refreshDeviceSessions(on: KnownDevice(alias: alias, deviceID: nil)) { _ in
+            requested.fulfill()
+            guard release.wait(timeout: .now() + 5) == .success else { throw URLError(.timedOut) }
+            return live
+        }
+
+        XCTAssertTrue(store.refreshingSessionRoutes.isEmpty)
+        store.refreshSessionList(on: KnownDevice(alias: alias, deviceID: nil)) { _ in empty }
+        release.signal()
+        await fulfillment(of: [requested], timeout: 3)
+        XCTAssertTrue(store.refreshingSessionRoutes.contains(TermiodRoute.ssh(alias).description))
+        release.signal()
+        try await waitForRoster(.ssh(alias), in: store)
+
+        XCTAssertEqual(store.sessions(inWorkspace: remote.id).map(\.termiodSessionName), ["external-shell"])
+        XCTAssertTrue(store.refreshingSessionRoutes.isEmpty)
+    }
+
+    func testManualRefreshFailureClearsProgressAndAllowsRetry() async throws {
+        let alias = "retry-\(UUID().uuidString)"
+        let remote = Workspace(name: "Remote", deviceAlias: alias)
+        let store = makeStore(workspaces: [remote])
+        let device = KnownDevice(alias: alias, deviceID: nil)
+        store.refreshSessionList(on: device) { _ in throw URLError(.cannotConnectToHost) }
+        try await waitForRoster(device.route, in: store)
+        XCTAssertTrue(store.refreshingSessionRoutes.isEmpty)
+        guard case .failed = store.deviceSessions else {
+            return XCTFail("The failed refresh should report the unreachable machine")
+        }
+
+        let live = try payload(name: "back-online", attached: 1)
+        store.refreshSessionList(on: device) { _ in live }
+        try await waitForRoster(device.route, in: store)
+        XCTAssertEqual(store.sessions(inWorkspace: remote.id).first?.termiodSessionName, "back-online")
+        XCTAssertTrue(store.refreshingSessionRoutes.isEmpty)
+    }
+
     func testAnUnreachableRemotePreservesLocalRosterAndCanBeRetried() async throws {
         let alias = "offline-\(UUID().uuidString)"
         var remoteSession = Session(title: "Remote shell", agent: .terminal)

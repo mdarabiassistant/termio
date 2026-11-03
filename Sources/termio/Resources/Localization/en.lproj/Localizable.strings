@@ -1178,6 +1178,8 @@
 	<string>Record Shortcut</string>
 	<key>Refresh</key>
 	<string>Refresh</string>
+	<key>Refresh Sessions on %@</key>
+	<string>Refresh Sessions on %@</string>
 	<key>Reinstall</key>
 	<string>Reinstall</string>
 	<key>Reinstall Hooks and Skill</key>

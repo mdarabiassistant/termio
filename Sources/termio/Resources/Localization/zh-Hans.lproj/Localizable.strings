@@ -1178,6 +1178,8 @@
 	<string>录制快捷键</string>
 	<key>Refresh</key>
 	<string>刷新</string>
+	<key>Refresh Sessions on %@</key>
+	<string>刷新 %@ 上的会话</string>
 	<key>Reinstall</key>
 	<string>重新安装</string>
 	<key>Reinstall Hooks and Skill</key>

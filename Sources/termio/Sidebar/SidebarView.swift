@@ -175,6 +175,8 @@ struct SidebarView: View {
 
     private func machineHeader(_ machine: SidebarMachineGroup) -> some View {
         let collapsed = collapsedMachines.contains(machine.id)
+        let isRefreshing = store.refreshingSessionRoutes.contains(machine.device.route.description)
+        let refreshLabel = localized("Refresh Sessions on \(machine.name)")
         return HStack(spacing: 6) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -199,6 +201,25 @@ struct SidebarView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(machine.name)
             .accessibilityValue(collapsed ? localized("Collapsed") : localized("Expanded"))
+            Button {
+                store.refreshSessionList(on: machine.device)
+            } label: {
+                ZStack {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .opacity(isRefreshing ? 0 : 1)
+                    if isRefreshing {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isRefreshing)
+            .help(refreshLabel)
+            .accessibilityLabel(refreshLabel)
         }
         .padding(.leading, -sidebarLeadingTrim)
         .padding(.top, machine.device.isLocal ? 0 : 12)
